@@ -1,0 +1,138 @@
+#!/bin/bash
+
+# tormarchy:summary=Report Tormarchy state as JSON
+# tormarchy:args=[--json]
+# tormarchy:examples=tormarchy-status --json
+
+# Unprivileged on purpose: the bar widget polls this every few seconds and must
+# never trigger an auth prompt to do it.
+
+set -uo pipefail
+
+# Resolve the shared library relative to this script, so a repo checkout and the
+# installed copy both work. Deliberately NOT an env var: these scripts re-exec
+# themselves as root, and a redirectable source path would hand an attacker
+# arbitrary code execution as root in a tool whose whole job is not leaking.
+_self_dir=$(dirname "$(readlink -f "$0")")
+for _candidate in "$_self_dir/../lib/tormarchy/common.sh" "$_self_dir/../lib/common.sh"; do
+  [[ -r $_candidate ]] && { source "$_candidate"; break; }
+done
+unset _self_dir _candidate
+type -t die >/dev/null 2>&1 || { echo "${0##*/}: cannot locate common.sh" >&2; exit 1; }
+
+if [[ ${1:-} == -h || ${1:-} == --help ]]; then
+  cat <<USAGE
+Usage: tormarchy-status [--json]
+
+Prints current state. --json emits the object the bar widget consumes; without
+it, a one-line human summary.
+USAGE
+  exit 0
+fi
+
+installed=false
+[[ -f $TORRC_BASE ]] && command -v tor >/dev/null 2>&1 && installed=true
+
+tor_running=false
+tor_is_running && tor_running=true
+
+connected=false
+rules_present && connected=true
+
+mode=$(current_mode)
+[[ -z $mode ]] && $connected && mode="lan"
+
+bootstrap=0
+exit_cc=""
+exit_ip=""
+circuit_age=0
+bytes_read=0
+bytes_written=0
+path_ccs=""
+warnings=()
+
+if $tor_running; then
+  if vitals=$(tor_vitals); then
+    IFS=$'\t' read -r bootstrap bytes_read bytes_written <<<"$vitals"
+  fi
+  if [[ ${bootstrap:-0} -ge 100 ]]; then
+    if info=$(circuit_path); then
+      IFS=$'\t' read -r _circuit_id circuit_age exit_ip path_ccs <<<"$info"
+      # The exit is the last hop, and it is the one the outside world sees.
+      exit_cc=${path_ccs##*,}
+      [[ $exit_cc == xx ]] && exit_cc=""
+    fi
+  fi
+fi
+
+# Requested exit country, if one is pinned.
+requested_exit=""
+if [[ -r $TORRC_EXIT ]]; then
+  requested_exit=$(sed -n 's/^[[:space:]]*ExitNodes[[:space:]]*{\([a-zA-Z]\{2\}\)}.*/\1/p' "$TORRC_EXIT" | head -1)
+fi
+
+# The one inconsistency worth shouting about: rules installed but no Tor behind
+# them. Traffic is not leaking -- it is going nowhere -- but the user needs to
+# know why the machine went quiet.
+if $connected && ! $tor_running; then
+  warnings+=("Rules are applied but tor is not running. Network is intentionally blocked; disconnect to restore it.")
+fi
+if $connected && [[ $mode != socks ]] && (( bootstrap < 100 )); then
+  warnings+=("Tor is still bootstrapping at ${bootstrap}%.")
+fi
+
+# Human-readable summary, chosen to describe the state that actually matters.
+if ! $installed; then
+  status_text="Tor helpers are not installed"
+elif [[ $mode == socks ]] && $tor_running; then
+  status_text="SOCKS proxy on 127.0.0.1:$SOCKS_PORT"
+elif $connected && [[ -n $exit_cc ]]; then
+  status_text="All traffic through Tor via ${exit_cc^^}"
+elif $connected; then
+  status_text="All traffic through Tor"
+elif $tor_running && (( bootstrap < 100 )); then
+  status_text="Bootstrapping at ${bootstrap}%"
+elif $tor_running; then
+  status_text="Tor is running but traffic is not routed through it"
+else
+  status_text="Disconnected"
+fi
+
+if [[ ${1:-} != --json ]]; then
+  echo "$status_text"
+  exit 0
+fi
+
+path_json=""
+if [[ -n $path_ccs ]]; then
+  IFS=',' read -ra _hops <<<"$path_ccs"
+  for _hop in "${_hops[@]}"; do
+    [[ -n $path_json ]] && path_json+=","
+    path_json+="\"$(json_escape "$_hop")\""
+  done
+fi
+
+warnings_json=""
+for warning in ${warnings+"${warnings[@]}"}; do
+  [[ -n $warnings_json ]] && warnings_json+=","
+  warnings_json+="\"$(json_escape "$warning")\""
+done
+
+cat <<JSON
+{
+  "installed": $installed,
+  "torRunning": $tor_running,
+  "connected": $connected,
+  "bootstrap": ${bootstrap:-0},
+  "mode": "$(json_escape "$mode")",
+  "exitIp": "$(json_escape "$exit_ip")",
+  "exitCountry": "$(json_escape "$exit_cc")",
+  "requestedExit": "$(json_escape "$requested_exit")",
+  "circuitAgeSec": ${circuit_age:-0},
+  "path": [$path_json],
+  "bytesRead": ${bytes_read:-0},
+  "bytesWritten": ${bytes_written:-0},
+  "statusText": "$(json_escape "$status_text")",
+  "warnings": [$warnings_json]
+}
+JSON

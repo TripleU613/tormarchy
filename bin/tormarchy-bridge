@@ -1,0 +1,240 @@
+#!/bin/bash
+
+# tormarchy:summary=Route Tor through a bridge, for networks that block it
+# tormarchy:args=status|set|off|on|transports
+# tormarchy:examples=tormarchy-bridge set < bridges.txt | tormarchy-bridge off
+
+# Bridges are unlisted relays reached over a pluggable transport, so a network
+# that blocks the public relay list cannot see Tor traffic. Without one, a
+# blocked network just means bootstrap never finishes.
+#
+# Deliberately no built-in bridge list. Public bridge addresses are rotated and
+# burned constantly, so a list baked in here would be stale within months and
+# fail in a way that looks like a bug in this tool. Get current ones from
+# https://bridges.torproject.org (or Telegram / email, see the help) and paste
+# them in -- that list is always current by construction.
+
+set -uo pipefail
+
+# Resolve the shared library relative to this script, so a repo checkout and the
+# installed copy both work. Deliberately NOT an env var: these scripts re-exec
+# themselves as root, and a redirectable source path would hand an attacker
+# arbitrary code execution as root in a tool whose whole job is not leaking.
+_self_dir=$(dirname "$(readlink -f "$0")")
+for _candidate in "$_self_dir/../lib/tormarchy/common.sh" "$_self_dir/../lib/common.sh"; do
+  [[ -r $_candidate ]] && { source "$_candidate"; break; }
+done
+unset _self_dir _candidate
+type -t die >/dev/null 2>&1 || { echo "${0##*/}: cannot locate common.sh" >&2; exit 1; }
+
+# Path comes from common.sh (BRIDGE_STASH) so connect can find it too.
+STASH="$BRIDGE_STASH"
+
+usage() {
+  cat <<USAGE
+Usage: tormarchy-bridge <command>
+
+  status          Show whether bridges are active, and which transports.
+  set             Read bridge lines from stdin and activate them. Existing
+                  lines are replaced. Takes no path: a root-run helper must not
+                  read a file chosen by an unprivileged caller.
+                    tormarchy-bridge set < bridges.txt
+                    pbpaste | tormarchy-bridge set
+  off             Stop using bridges and connect directly. The lines are kept,
+                  so 'tormarchy-bridge on' brings them back.
+  on              Reactivate previously stashed bridge lines.
+  transports      List pluggable transports installed on this machine.
+
+Where to get bridge lines:
+  https://bridges.torproject.org/options
+  Telegram: @GetBridgesBot
+  Email:    bridges@torproject.org (from a Gmail or Riseup address)
+
+A bridge line looks like:
+  obfs4 1.2.3.4:443 FINGERPRINT cert=... iat-mode=0
+USAGE
+}
+
+# Transport name to the binary that speaks it. Tor calls the plugin by the name
+# in the bridge line, so this mapping is what decides whether a pasted line can
+# actually be used.
+transport_binary() {
+  local transport="$1" candidate
+  case "$transport" in
+  obfs4 | obfs3 | scramblesuit)
+    # lyrebird is obfs4proxy's current name; accept either.
+    for candidate in lyrebird obfs4proxy; do
+      command -v "$candidate" 2>/dev/null && return 0
+    done
+    return 1
+    ;;
+  meek | meek_lite)
+    command -v meek-client 2>/dev/null && return 0 || return 1
+    ;;
+  snowflake)
+    command -v snowflake-client 2>/dev/null && return 0 || return 1
+    ;;
+  webtunnel)
+    command -v webtunnel-client 2>/dev/null && return 0 || return 1
+    ;;
+  *)
+    return 1
+    ;;
+  esac
+}
+
+install_hint() {
+  case "$1" in
+  obfs4 | obfs3 | scramblesuit) echo "omarchy-pkg-aur-add obfs4proxy" ;;
+  meek | meek_lite) echo "omarchy-pkg-add meek" ;;
+  snowflake) echo "not packaged for Arch; build snowflake-client from https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake" ;;
+  webtunnel) echo "not packaged for Arch; build webtunnel-client from the Tor anti-censorship repos" ;;
+  *) echo "unknown transport '$1'" ;;
+  esac
+}
+
+bridges_active() {
+  [[ -f $TORRC_BRIDGES ]]
+}
+
+# Transport names used by a set of bridge lines, deduplicated.
+transports_in() {
+  awk '!/^[[:space:]]*(#|$)/ { print $1 }' "$1" 2>/dev/null | sort -u
+}
+
+show_status() {
+  if bridges_active; then
+    echo "Bridges: ACTIVE"
+    local t
+    while read -r t; do
+      [[ -n $t ]] || continue
+      printf '  %s (%s)\n' "$t" "$(transport_binary "$t" >/dev/null 2>&1 && echo available || echo MISSING)"
+    done < <(transports_in "$TORRC_BRIDGES")
+    printf '  %s bridge line(s)\n' "$(grep -c '^Bridge ' "$TORRC_BRIDGES" 2>/dev/null || echo 0)"
+  elif [[ -f $STASH ]]; then
+    echo "Bridges: off (lines stashed -- 'tormarchy-bridge on' to use them)"
+  else
+    echo "Bridges: off (none configured)"
+  fi
+}
+
+# Turn a set of bridge lines into a torrc snippet, refusing anything whose
+# transport this machine cannot actually run. Writing a config that names a
+# missing plugin makes tor fail to start, which reads as a broken install
+# rather than a missing package.
+write_config() {
+  local source_file="$1"
+  local -a missing=()
+  local transport
+
+  while read -r transport; do
+    [[ -n $transport ]] || continue
+    if ! transport_binary "$transport" >/dev/null 2>&1; then
+      missing+=("$transport")
+    fi
+  done < <(transports_in "$source_file")
+
+  if (( ${#missing[@]} > 0 )); then
+    echo "These bridge lines need transports that are not installed:" >&2
+    for transport in "${missing[@]}"; do
+      printf '  %-12s install with: %s\n' "$transport" "$(install_hint "$transport")" >&2
+    done
+    die "refusing to write a config tor cannot load"
+  fi
+
+  install -d -m 0755 "$TORRC_DIR"
+  {
+    echo "# Managed by tormarchy-bridge. Edit with 'tormarchy-bridge set'."
+    echo "UseBridges 1"
+    while read -r transport; do
+      [[ -n $transport ]] || continue
+      printf 'ClientTransportPlugin %s exec %s\n' "$transport" "$(transport_binary "$transport")"
+    done < <(transports_in "$source_file")
+    awk '!/^[[:space:]]*(#|$)/ { print "Bridge " $0 }' "$source_file"
+  } >"$TORRC_BRIDGES"
+  # 0600: which bridges you use is exactly the thing a bridge is meant to hide,
+  # and tor reads its config as root before dropping privileges, so it does not
+  # need to be readable by anyone else.
+  chmod 0600 "$TORRC_BRIDGES"
+}
+
+reload_tor() {
+  tor_is_running || return 0
+  # Bridges change how tor reaches the network at all, which a reload does not
+  # renegotiate; a restart is the only way it takes effect.
+  systemctl reset-failed tor.service 2>/dev/null || true
+  systemctl restart tor.service || die "wrote the config but could not restart tor"
+  # A restart regenerates the cookie, so the published copy is now stale.
+  publish_cookie || true
+}
+
+case "${1:-status}" in
+-h | --help)
+  usage
+  exit 0
+  ;;
+status)
+  show_status
+  exit 0
+  ;;
+transports)
+  for transport in obfs4 meek_lite snowflake webtunnel; do
+    if binary=$(transport_binary "$transport" 2>/dev/null); then
+      printf '  %-12s %s\n' "$transport" "$binary"
+    else
+      printf '  %-12s missing -- %s\n' "$transport" "$(install_hint "$transport")"
+    fi
+  done
+  exit 0
+  ;;
+set)
+  # Content arrives on stdin only. There is deliberately no path argument.
+  #
+  # The previous shape -- stage the lines in /tmp, then re-exec as root with
+  # that path as argv -- was three vulnerabilities at once. Root would read any
+  # path the caller named, so `pkexec tormarchy-bridge set /etc/shadow` parsed a
+  # root-only file into a world-readable torrc snippet. The cleanup test
+  # `[[ $input == /tmp/.tormarchy-bridges.* ]]` matched a traversal, because a
+  # bash glob's * spans '/', giving arbitrary file deletion as root. And the
+  # staging name was predictable, so it raced against a symlink.
+  #
+  # pkexec and sudo both hand stdin through to the target, so escalating first
+  # and reading afterwards removes the file path, the temp file and all three
+  # problems together.
+  require_root set
+
+  tmp=$(mktemp "$TORRC_DIR/.bridges.XXXXXX") || die "could not create a staging file"
+  trap 'rm -f "$tmp"' EXIT
+  chmod 0600 "$tmp"
+
+  cat >"$tmp"
+  [[ -s $tmp ]] || die "no input received on stdin; pipe bridge lines in, e.g. tormarchy-bridge set < bridges.txt"
+
+  grep -qE '^[[:space:]]*[a-z0-9_]+[[:space:]]+[0-9a-fA-F.:\[]' "$tmp" \
+    || die "no bridge lines found; each line starts with a transport name, e.g. obfs4"
+
+  install -d -m 0700 "$(dirname "$STASH")"
+  install -m 0600 "$tmp" "$STASH"
+  write_config "$tmp"
+  reload_tor
+  echo "Bridges active."
+  show_status
+  ;;
+on)
+  require_root on
+  [[ -f $STASH ]] || die "no stashed bridge lines; use 'tormarchy-bridge set' first"
+  write_config "$STASH"
+  reload_tor
+  echo "Bridges reactivated."
+  ;;
+off)
+  require_root off
+  rm -f "$TORRC_BRIDGES"
+  reload_tor
+  echo "Bridges off. Connecting directly."
+  ;;
+*)
+  usage >&2
+  exit 1
+  ;;
+esac

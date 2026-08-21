@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "id": "usher.tor",
+  "name": "Tormarchy",
+  "version": "0.1.0",
+  "author": "usher",
+  "license": "MIT",
+  "description": "Route all system traffic through Tor from the Omarchy bar, with a real kill switch, new circuits, and exit-country selection.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Tor",
+    "description": "Toggle system-wide Tor, request a new circuit, pick an exit country, and test circuit speed.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "mode": "lan",
+      "refreshIntervalSec": 5,
+      "speedIntervalSec": 20
+    },
+    "schema": [
+      {
+        "key": "mode",
+        "type": "enum",
+        "label": "Default mode",
+        "options": ["lan", "strict", "socks"],
+        "defaultValue": "lan",
+        "description": "lan: all WAN through Tor, local network still reachable. strict: local network dropped too. socks: no system-wide change, apps opt in to the SOCKS proxy on 9050."
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 2,
+        "max": 300,
+        "step": 1,
+        "defaultValue": 5
+      },
+      {
+        "key": "speedIntervalSec",
+        "type": "integer",
+        "label": "Latency measurement interval (seconds)",
+        "description": "How often to time the circuit while the panel is open. Each measurement is a real request over Tor, so this never runs while the panel is closed.",
+        "min": 5,
+        "max": 600,
+        "step": 5,
+        "defaultValue": 20
+      }
+    ]
+  }
+}

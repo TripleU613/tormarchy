@@ -1,0 +1,40 @@
+#!/bin/bash
+
+# tormarchy:summary=Remove every Tormarchy firewall rule, unconditionally
+# tormarchy:examples=tormarchy-panic
+
+# The escape hatch. Makes no checks, asks no questions, and never fails: if a
+# wedged ruleset has left the machine with no network to explain itself with,
+# this is the command that gives it back. Deliberately does not stop tor --
+# one job, done bluntly.
+
+set -uo pipefail
+
+# Resolve the shared library relative to this script, so a repo checkout and the
+# installed copy both work. Deliberately NOT an env var: these scripts re-exec
+# themselves as root, and a redirectable source path would hand an attacker
+# arbitrary code execution as root in a tool whose whole job is not leaking.
+_self_dir=$(dirname "$(readlink -f "$0")")
+for _candidate in "$_self_dir/../lib/tormarchy/common.sh" "$_self_dir/../lib/common.sh"; do
+  [[ -r $_candidate ]] && { source "$_candidate"; break; }
+done
+unset _self_dir _candidate
+type -t die >/dev/null 2>&1 || { echo "${0##*/}: cannot locate common.sh" >&2; exit 1; }
+
+if [[ ${1:-} == -h || ${1:-} == --help ]]; then
+  cat <<USAGE
+Usage: tormarchy-panic
+
+Deletes the "$NFT_TABLE" nftables table and clears Tormarchy's state, restoring
+normal networking. Leaves tor itself alone. Safe to run when nothing is applied.
+USAGE
+  exit 0
+fi
+
+require_root "$@"
+
+flush_rules
+rm -f "$ACTIVE_FILE"
+rm -rf "$STATE_DIR"
+
+echo "Removed all Tormarchy rules. Networking is back to normal."

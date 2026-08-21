@@ -1,0 +1,131 @@
+#!/bin/bash
+
+# tormarchy:summary=Check for leaks and common Tor routing problems
+# tormarchy:examples=tormarchy-doctor
+
+# Read-only. Makes real network requests, so it is a command you run, never
+# something polled.
+
+set -uo pipefail
+
+# Resolve the shared library relative to this script, so a repo checkout and the
+# installed copy both work. Deliberately NOT an env var: these scripts re-exec
+# themselves as root, and a redirectable source path would hand an attacker
+# arbitrary code execution as root in a tool whose whole job is not leaking.
+_self_dir=$(dirname "$(readlink -f "$0")")
+for _candidate in "$_self_dir/../lib/tormarchy/common.sh" "$_self_dir/../lib/common.sh"; do
+  [[ -r $_candidate ]] && { source "$_candidate"; break; }
+done
+unset _self_dir _candidate
+type -t die >/dev/null 2>&1 || { echo "${0##*/}: cannot locate common.sh" >&2; exit 1; }
+
+pass() { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+fail() { printf '  \033[31m✗\033[0m %s\n' "$1"; failures=$(( failures + 1 )); }
+warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
+skip() { printf '  \033[90m-\033[0m %s\n' "$1"; }
+
+failures=0
+
+if [[ ${1:-} == -h || ${1:-} == --help ]]; then
+  echo "Usage: tormarchy-doctor"
+  echo
+  echo "Checks whether traffic really is going through Tor and whether anything"
+  echo "is escaping around it. Run it while connected."
+  exit 0
+fi
+
+mode=$(current_mode)
+connected=false
+rules_present && connected=true
+
+echo "Tormarchy doctor"
+echo
+echo "State"
+printf '  mode: %s\n' "${mode:-none}"
+printf '  rules applied: %s\n' "$connected"
+printf '  tor running: %s\n' "$(tor_is_running && echo true || echo false)"
+echo
+
+echo "Tor daemon"
+if ! command -v tor >/dev/null 2>&1; then
+  fail "tor is not installed"
+elif ! tor_is_running; then
+  fail "tor.service is not running"
+else
+  pass "tor.service is running"
+  pct=$(bootstrap_progress) || pct=0
+  if (( pct >= 100 )); then
+    pass "bootstrapped (100%)"
+  else
+    fail "bootstrap stalled at ${pct}%"
+  fi
+  if cookie=$(cookie_path); then
+    pass "control port cookie is readable at $cookie (new circuits will work)"
+  else
+    fail "cannot read the control cookie: $(cookie_hint)"
+  fi
+fi
+echo
+
+echo "Routing"
+if [[ $mode == socks ]]; then
+  skip "socks mode: nothing is routed system-wide by design"
+elif ! $connected; then
+  skip "not connected, so there is nothing to leak"
+else
+  # The definitive test. If this says false while rules are applied, something
+  # is escaping the redirect and that is the one result worth alarming about.
+  if body=$(curl -sf -m 25 https://check.torproject.org/api/ip 2>/dev/null); then
+    if grep -q '"IsTor":true' <<<"$body"; then
+      pass "check.torproject.org confirms this connection is Tor"
+      seen_ip=$(sed -n 's/.*"IP":"\([^"]*\)".*/\1/p' <<<"$body")
+      [[ -n $seen_ip ]] && printf '    exit as seen from outside: %s\n' "$seen_ip"
+    else
+      fail "check.torproject.org says this is NOT Tor -- traffic is escaping the redirect"
+    fi
+  else
+    fail "could not reach check.torproject.org (no route, or Tor is not carrying traffic)"
+  fi
+
+  # IPv6 must be dead. Success here is a leak.
+  if curl -6 -sf -m 8 https://ipv6.icanhazip.com >/dev/null 2>&1; then
+    fail "IPv6 reached the internet directly -- this is a leak"
+  else
+    pass "IPv6 is blocked"
+  fi
+
+  if getent hosts example.com >/dev/null 2>&1; then
+    pass "DNS resolves (through Tor's DNSPort)"
+  else
+    fail "DNS is not resolving"
+  fi
+
+  if (( EUID == 0 )); then
+    dropped=$(nft -j list table inet "$NFT_TABLE" 2>/dev/null \
+      | jq -r '[.nftables[]?.rule?.expr[]?.counter?.packets // empty] | add // 0' 2>/dev/null)
+    [[ -n $dropped && $dropped != null ]] \
+      && printf '    kill switch has dropped %s packets\n' "$dropped"
+  else
+    skip "run as root to see kill-switch drop counters"
+  fi
+fi
+echo
+
+echo "Clock"
+# Tor will not build circuits against a badly skewed clock, and our own ruleset
+# drops NTP while connected -- so a long session can drift itself broken.
+if timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -q yes; then
+  pass "clock is NTP-synchronised"
+elif $connected; then
+  warn "clock is not synchronised, and NTP is blocked while connected. Disconnect briefly to resync if Tor starts failing."
+else
+  warn "clock is not NTP-synchronised; Tor needs an accurate clock"
+fi
+echo
+
+if (( failures == 0 )); then
+  echo "No problems found."
+else
+  echo "$failures problem(s) found."
+  exit 1
+fi

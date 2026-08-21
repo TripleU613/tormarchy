@@ -1,0 +1,97 @@
+#!/bin/bash
+
+# tormarchy:summary=Measure round-trip latency through the current Tor circuit
+# tormarchy:args=[--json]
+# tormarchy:examples=tormarchy-speed --json
+
+# Unprivileged, but NOT free: this makes a real request over the circuit, so it
+# is something the user asks for, never something polled on a timer.
+
+set -uo pipefail
+
+# Resolve the shared library relative to this script, so a repo checkout and the
+# installed copy both work. Deliberately NOT an env var: these scripts re-exec
+# themselves as root, and a redirectable source path would hand an attacker
+# arbitrary code execution as root in a tool whose whole job is not leaking.
+_self_dir=$(dirname "$(readlink -f "$0")")
+for _candidate in "$_self_dir/../lib/tormarchy/common.sh" "$_self_dir/../lib/common.sh"; do
+  [[ -r $_candidate ]] && { source "$_candidate"; break; }
+done
+unset _self_dir _candidate
+type -t die >/dev/null 2>&1 || { echo "${0##*/}: cannot locate common.sh" >&2; exit 1; }
+
+if [[ ${1:-} == -h || ${1:-} == --help ]]; then
+  cat <<USAGE
+Usage: tormarchy-speed [--json]
+
+Times a request through Tor's SOCKS proxy and reports the round trip in
+milliseconds. Always goes through the proxy explicitly, so the number means the
+same thing in every mode -- including browser-only, where nothing is routed
+system-wide and a plain request would not touch Tor at all.
+USAGE
+  exit 0
+fi
+
+tor_is_running || {
+  [[ ${1:-} == --json ]] && echo '{"ok":false,"latencyMs":0,"error":"tor is not running"}' || echo "tor is not running" >&2
+  exit 1
+}
+
+# A .onion target would measure a six-hop rendezvous rather than the three-hop
+# exit path the user's traffic actually takes, so these deliberately exit to the
+# normal internet.
+#
+# Several of them, tried in order: this measures the circuit, not any one site's
+# availability, so a single hard-coded host turns somebody else's outage into a
+# broken gauge.
+TARGETS=(
+  "https://check.torproject.org/api/ip"
+  "https://www.torproject.org/"
+  "https://one.one.one.one/"
+)
+
+# time_starttransfer is time-to-first-byte: DNS, circuit, TLS and the server's
+# think time. That is the number that matches how slow the machine *feels*.
+#
+# Any HTTP status counts. A 301 or a 403 still proves the round trip completed
+# and still yields a valid time; insisting on 200 meant a redirect was reported
+# as "could not reach", which is both wrong and impossible to act on.
+seconds=""
+status=0
+for target in "${TARGETS[@]}"; do
+  raw=$(curl -s -o /dev/null \
+    --socks5-hostname "127.0.0.1:$SOCKS_PORT" \
+    --max-time 20 \
+    -w '%{time_starttransfer} %{http_code}' \
+    "$target" 2>/dev/null)
+  status=$?
+
+  candidate=$(awk '{print $1}' <<<"$raw")
+  http=$(awk '{print $2}' <<<"$raw")
+
+  if (( status == 0 )) && [[ -n $candidate && $http != 000 ]]; then
+    seconds=$candidate
+    break
+  fi
+done
+
+if [[ -z $seconds ]]; then
+  # Kept short: this string is shown in a narrow panel, where a full URL is
+  # elided to "cannot reach https://ch..." and tells the reader nothing.
+  message="no response through the Tor SOCKS proxy on 127.0.0.1:$SOCKS_PORT"
+  (( status == 28 )) && message="timed out through the Tor SOCKS proxy"
+  if [[ ${1:-} == --json ]]; then
+    printf '{"ok":false,"latencyMs":0,"error":"%s"}\n' "$(json_escape "$message")"
+  else
+    echo "$message" >&2
+  fi
+  exit 1
+fi
+
+ms=$(awk -v s="$seconds" 'BEGIN { printf "%d", s * 1000 }')
+
+if [[ ${1:-} == --json ]]; then
+  printf '{"ok":true,"latencyMs":%d,"error":""}\n' "$ms"
+else
+  printf '%d ms\n' "$ms"
+fi

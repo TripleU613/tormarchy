@@ -1,0 +1,41 @@
+#!/bin/bash
+
+# tormarchy:summary=Request a new Tor circuit
+# tormarchy:examples=tormarchy-newnym
+
+# Unprivileged: authenticates to the control port with the cookie that group
+# membership lets us read, so a new circuit costs no password prompt.
+
+set -uo pipefail
+
+# Resolve the shared library relative to this script, so a repo checkout and the
+# installed copy both work. Deliberately NOT an env var: these scripts re-exec
+# themselves as root, and a redirectable source path would hand an attacker
+# arbitrary code execution as root in a tool whose whole job is not leaking.
+_self_dir=$(dirname "$(readlink -f "$0")")
+for _candidate in "$_self_dir/../lib/tormarchy/common.sh" "$_self_dir/../lib/common.sh"; do
+  [[ -r $_candidate ]] && { source "$_candidate"; break; }
+done
+unset _self_dir _candidate
+type -t die >/dev/null 2>&1 || { echo "${0##*/}: cannot locate common.sh" >&2; exit 1; }
+
+if [[ ${1:-} == -h || ${1:-} == --help ]]; then
+  cat <<USAGE
+Usage: tormarchy-newnym
+
+Sends SIGNAL NEWNYM, so new connections use a fresh circuit. Existing streams
+keep their current one until they close.
+USAGE
+  exit 0
+fi
+
+tor_is_running || die "tor is not running"
+
+if ! cookie=$(cookie_path); then
+  die "cannot reach tor's control port: $(cookie_hint)"
+fi
+
+reply=$(tor_control 'SIGNAL NEWNYM') || die "could not reach tor's control port on 127.0.0.1:$CONTROL_PORT"
+grep -q '^250' <<<"$reply" || die "tor refused the NEWNYM request: $(head -1 <<<"$reply")"
+
+echo "New circuit requested."

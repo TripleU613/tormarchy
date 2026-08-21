@@ -1,0 +1,186 @@
+#!/bin/bash
+
+# One-time privileged install for Tormarchy. Run as root:
+#
+#   sudo ~/.config/omarchy/plugins/usher.tor/setup
+#
+# Installs tor, the privileged helpers, and a polkit policy so the bar widget
+# can connect with one prompt instead of a terminal. Idempotent.
+
+set -uo pipefail
+
+REPO_DIR=$(dirname "$(readlink -f "$0")")
+
+BIN_DIR=/usr/local/bin
+LIB_DIR=/usr/local/lib/tormarchy
+TORRC=/etc/tor/torrc
+TORRC_DIR=/etc/tor/torrc.d
+POLKIT_ACTIONS=/usr/share/polkit-1/actions
+POLKIT_RULES=/etc/polkit-1/rules.d
+TMPFILES_DIR=/etc/tmpfiles.d
+UNIT_DROPIN=/etc/systemd/system/tor.service.d
+
+die() { echo "setup: $*" >&2; exit 1; }
+step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+
+(( EUID == 0 )) || die "run this with sudo"
+
+# Who to add to the tor group -- the human who invoked sudo, not root.
+target_user="${SUDO_USER:-}"
+if [[ -z $target_user && -n ${PKEXEC_UID:-} ]]; then
+  target_user=$(id -un "$PKEXEC_UID" 2>/dev/null || true)
+fi
+
+step "Installing tor"
+if command -v tor >/dev/null 2>&1; then
+  echo "  already installed"
+else
+  pacman -S --needed --noconfirm tor || die "could not install tor"
+fi
+
+step "Installing helpers into $BIN_DIR"
+install -d -m 0755 "$LIB_DIR"
+install -m 0644 "$REPO_DIR/lib/common.sh" "$LIB_DIR/common.sh"
+for helper in "$REPO_DIR"/bin/tormarchy-*; do
+  install -m 0755 "$helper" "$BIN_DIR/${helper##*/}"
+  echo "  ${helper##*/}"
+done
+
+step "Configuring tor"
+install -d -m 0755 "$TORRC_DIR"
+install -m 0644 "$REPO_DIR/etc/torrc.d/00-tormarchy.conf" "$TORRC_DIR/00-tormarchy.conf"
+echo "  $TORRC_DIR/00-tormarchy.conf"
+
+# Directory form, not a glob or a named file: tor reads every file in the
+# directory in lexical order, and naming a file that does not exist yet (the
+# exit pin) would be a hard config error.
+if [[ -f $TORRC ]] && grep -qE "^[[:space:]]*%include[[:space:]]+$TORRC_DIR/?[[:space:]]*$" "$TORRC"; then
+  echo "  $TORRC already includes $TORRC_DIR"
+else
+  printf '\n# Added by tormarchy setup.\n%%include %s\n' "$TORRC_DIR" >>"$TORRC"
+  echo "  added the include to $TORRC"
+fi
+
+# A drop-in used to live here to give tor a writable /run/tor for its control
+# cookie. It is gone: the service sandbox declares only /var/lib/tor and
+# /var/log/tor writable, so the cookie belongs in DataDirectory and no unit
+# override is needed. Remove any copy left by an earlier install.
+if [[ -f $UNIT_DROPIN/10-tormarchy.conf ]]; then
+  rm -f "$UNIT_DROPIN/10-tormarchy.conf"
+  rmdir "$UNIT_DROPIN" 2>/dev/null || true
+  echo "  removed an obsolete systemd drop-in"
+fi
+systemctl daemon-reload
+
+# tor ships DataDirectory as 0700, which stops the tor group traversing in to
+# read the group-readable cookie. Override the packaged tmpfiles rule rather
+# than chmod'ing: the rule is reapplied at boot and on any systemd-tmpfiles
+# run, so a chmod would quietly revert and break this again later.
+install -d -m 0755 "$TMPFILES_DIR"
+install -m 0644 "$REPO_DIR/etc/tmpfiles/tor.conf" "$TMPFILES_DIR/tor.conf"
+echo "  $TMPFILES_DIR/tor.conf (overrides the packaged 0700 rule)"
+systemd-tmpfiles --create "$TMPFILES_DIR/tor.conf" 2>/dev/null || true
+mode=$(stat -c '%a' /var/lib/tor 2>/dev/null)
+echo "  /var/lib/tor is now mode $mode"
+
+# A failed earlier attempt leaves the start limit tripped, and the next start
+# then fails with "start request repeated too quickly" -- a message about
+# nothing to do with the config, which sends you hunting in the wrong place.
+if [[ $(systemctl is-failed tor.service 2>/dev/null) == failed ]]; then
+  systemctl reset-failed tor.service
+  echo "  cleared a previous failed start"
+fi
+
+step "Installing the polkit policy"
+# Check before installing. An unparseable policy is the worst kind of broken
+# here: polkitd registers none of the actions, pkexec quietly falls back to its
+# generic admin-auth action, and the only symptom is a password prompt that no
+# rule can suppress and nothing logs a reason for. A stray "--" inside an XML
+# comment is enough to cause it.
+if command -v xmllint >/dev/null 2>&1; then
+  xmllint --noout "$REPO_DIR/etc/polkit/com.tormarchy.policy" \
+    || die "the polkit policy is not well-formed XML; refusing to install it"
+  echo "  policy XML is well-formed"
+else
+  echo "  (xmllint not installed, skipping the XML check)"
+fi
+install -m 0644 "$REPO_DIR/etc/polkit/com.tormarchy.policy" "$POLKIT_ACTIONS/com.tormarchy.policy"
+echo "  $POLKIT_ACTIONS/com.tormarchy.policy"
+
+# The rule is what makes the bar toggle a toggle. It is generated rather than
+# copied because it pins the installing user by name -- see the comments in
+# the .in file for why that beats a group check.
+install -d -m 0755 "$POLKIT_RULES"
+if [[ -z $target_user ]]; then
+  echo "  SKIPPED: could not tell who invoked sudo, so the rule cannot name a user." >&2
+  echo "  Connecting will keep prompting. Re-run as: sudo ./setup" >&2
+else
+  sed "s/@TORMARCHY_USER@/$target_user/g" \
+    "$REPO_DIR/etc/polkit/49-tormarchy.rules.in" >"$POLKIT_RULES/49-tormarchy.rules"
+  chmod 0644 "$POLKIT_RULES/49-tormarchy.rules"
+  echo "  $POLKIT_RULES/49-tormarchy.rules (granted to $target_user)"
+fi
+
+step "Verifying polkit registered the actions"
+# The install can succeed and still leave the actions unregistered, so ask
+# polkitd what it actually knows about rather than trusting the file copy.
+if command -v pkaction >/dev/null 2>&1; then
+  registered=$(pkaction 2>/dev/null | grep -c '^com\.tormarchy\.')
+  if (( registered >= 6 )); then
+    echo "  $registered actions registered"
+  else
+    echo "  WARNING: only $registered of 6 actions registered." >&2
+    echo "  Connecting will prompt for a password. Check: xmllint --noout $POLKIT_ACTIONS/com.tormarchy.policy" >&2
+  fi
+else
+  echo "  (pkaction not available, skipping)"
+fi
+
+step "Verifying the tor config"
+# Catch a broken torrc now, while there is someone here to read the error,
+# rather than at the first click on the bar.
+if tor --verify-config -f "$TORRC" >/tmp/tormarchy-verify.log 2>&1; then
+  echo "  config is valid"
+else
+  cat /tmp/tormarchy-verify.log >&2
+  die "tor rejected the configuration (see above); nothing has been started"
+fi
+
+step "Control port access"
+if [[ -n $target_user ]]; then
+  if id -nG "$target_user" | tr ' ' '\n' | grep -qx tor; then
+    echo "  $target_user is already in the 'tor' group"
+  else
+    usermod -aG tor "$target_user" || die "could not add $target_user to the tor group"
+    echo "  added $target_user to the 'tor' group"
+    needs_relogin=1
+  fi
+else
+  echo "  could not tell who invoked sudo; add yourself with: usermod -aG tor \$USER"
+fi
+
+# Deliberately not enabled at boot. Tor starting itself on every boot would be
+# a surprise, and the ruleset is applied by tormarchy-connect, never at boot --
+# that is what guarantees a reboot always restores normal networking.
+step "Done"
+cat <<DONE
+
+  tor is installed but NOT enabled at boot, on purpose: a reboot always
+  restores normal networking, which is the way out of a wedged ruleset.
+
+  Connecting will not ask for a password: the polkit rule grants it to
+  $target_user in a local, active session. Delete
+  /etc/polkit-1/rules.d/49-tormarchy.rules to go back to being asked.
+
+  Next:
+    Click the onion in the bar, or run:  tormarchy-connect
+    Check for leaks with:                tormarchy-doctor
+    Emergency reset:                     tormarchy-panic
+DONE
+
+if [[ -n ${needs_relogin:-} ]]; then
+  cat <<RELOGIN
+  One catch: group changes only apply to new logins. Log out and back in
+  before "New circuit" will work without a password prompt.
+RELOGIN
+fi

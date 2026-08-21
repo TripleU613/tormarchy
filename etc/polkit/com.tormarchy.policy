@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<!--
+  Managed by tormarchy.
+
+  NOTE TO ANYONE EDITING THIS FILE: a double hyphen is illegal inside an XML
+  comment. Writing one here does not merely break the comment, it makes the
+  whole document unparseable, polkitd registers none of the actions below, and
+  pkexec silently falls back to its generic admin-auth action. The visible
+  symptom is a password prompt that no rule can suppress, with nothing logged
+  to explain it. Use an em dash instead.
+
+  These defaults are the FALLBACK, not the normal path. 49-tormarchy.rules
+  grants these actions outright to the local, active user who ran setup, so
+  that person is never prompted. Everyone else — another account on the box,
+  or anyone arriving over SSH — lands here and has to authenticate.
+  auth_admin_keep rather than auth_admin so that, for those users, one prompt
+  covers a short burst and switching mode right after connecting does not ask
+  twice.
+
+  Each action pins an absolute program path. pkexec would otherwise fall back
+  to its generic action, which authenticates the caller's intent to run
+  something rather than this specific, reviewable helper.
+-->
+<policyconfig>
+  <vendor>Tormarchy</vendor>
+  <vendor_url>https://github.com/usher/tormarchy</vendor_url>
+
+  <action id="com.tormarchy.connect">
+    <description>Route all network traffic through Tor</description>
+    <message>Authentication is required to route all network traffic through Tor</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/tormarchy-connect</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="com.tormarchy.disconnect">
+    <description>Stop routing traffic through Tor</description>
+    <message>Authentication is required to stop routing traffic through Tor</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/tormarchy-disconnect</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="com.tormarchy.mode">
+    <description>Change the Tor routing mode</description>
+    <message>Authentication is required to change the Tor routing mode</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/tormarchy-mode</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="com.tormarchy.exit">
+    <description>Change the Tor exit country</description>
+    <message>Authentication is required to change the Tor exit country</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/tormarchy-exit</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="com.tormarchy.bridge">
+    <description>Change Tor bridge settings</description>
+    <message>Authentication is required to change Tor bridge settings</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/tormarchy-bridge</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <!-- The escape hatch only ever removes restrictions, so it stays cheap to
+       reach when the machine has no network to explain itself with. -->
+  <action id="com.tormarchy.panic">
+    <description>Remove all Tor firewall rules</description>
+    <message>Authentication is required to remove the Tor firewall rules</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/tormarchy-panic</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
