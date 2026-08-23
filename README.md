@@ -8,8 +8,6 @@
 </p>
 
 <p align="center">
-  <img alt="Disconnected" width="46%" src="https://github.com/user-attachments/assets/ee26e379-79d6-496c-872a-3cf4bac77bee" />
-  &nbsp;
   <img alt="Connected" width="46%" src="https://github.com/user-attachments/assets/f670dd75-11cd-498e-96b9-0e8a0ca544ae" />
 </p>
 
