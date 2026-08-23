@@ -147,7 +147,6 @@ Panel {
     order.push("speed")
     if (tor.connected) order.push("newnym")
     order.push("mode")
-    if (tor.connected) order.push("panic")
     return order
   }
 
@@ -188,7 +187,6 @@ Panel {
     else if (focusSection === "exit") exitPicker.toggle()
     else if (focusSection === "speed") tor.measureSpeed()
     else if (focusSection === "mode") tor.setMode(Model.MODE_ORDER[modeIndex])
-    else if (focusSection === "panic") tor.panic()
   }
 
   function toggleConnected() {
@@ -244,8 +242,11 @@ Panel {
   function runSetup() {
     if (!bar) return
     close()
+    // A real terminal, not pkexec: setup refuses to run through polkit, since
+    // the single action pins the program path and not its arguments, so a
+    // passwordless grant for connect would otherwise cover uninstall too.
     bar.run("omarchy-launch-floating-terminal-with-presentation "
-      + Util.shellQuote("sudo " + pluginDir + "/setup"))
+      + Util.shellQuote("sudo " + pluginDir + "/tormarchy setup"))
   }
 
   implicitWidth: button.implicitWidth
@@ -885,70 +886,16 @@ Panel {
 
           }
 
-          // No prose in the panel. What each mode does lives on the segments
-          // as hover tooltips, and the UDP/IPv6 caveats live in the README.
+          // No prose in the panel. What each mode does lives on the segments as
+          // hover tooltips, and the UDP/IPv6 caveats live in the README.
           //
-          // The destructive action is deliberately not full width: spanning the
-          // whole panel gave a secondary, rarely wanted control the visual
-          // weight of the primary one. It sits in the right-hand column with
-          // the other actions instead.
-          Column {
-            visible: tor.connected
-            width: parent.width
-            spacing: root.gapTight
-
-            PanelSeparator { foreground: root.foreground }
-
-            Item {
-              width: parent.width
-              height: root.actionHeight
-
-              Surface {
-                id: panicAction
-                anchors.right: parent.right
-                width: root.gridColumn(parent.width)
-                height: parent.height
-                clip: true
-
-                readonly property bool hot: panicHover.containsMouse
-                  || (root.cursorActive && root.focusSection === "panic")
-
-                border.color: hot ? Util.alpha(root.urgent, 0.6) : root.surfaceLine
-                color: hot ? Util.alpha(root.urgent, 0.10) : root.surfaceFill
-
-                Behavior on color { ColorAnimation { duration: 140 } }
-
-                Text {
-                  anchors.centerIn: parent
-                  width: parent.width - Style.space(8)
-                  horizontalAlignment: Text.AlignHCenter
-                  elide: Text.ElideRight
-                  text: qsTr("Remove all rules")
-                  color: root.urgent
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-
-                MouseArea {
-                  id: panicHover
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: tor.panic()
-                  onContainsMouseChanged: if (containsMouse) {
-                    root.cursorActive = true
-                    root.focusSection = "panic"
-                  }
-                }
-
-                PanelToolTip {
-                  visible: panicHover.containsMouse
-                  text: qsTr("Tear down every Tor firewall rule and restore normal networking")
-                }
-              }
-            }
-          }
-
+          // There is deliberately no "Remove all rules" button. Switching the
+          // toggle off already runs tormarchy-disconnect, which removes the
+          // ruleset -- so the button was a second control for what the switch
+          // does, sitting right beside it and inviting the question of how the
+          // two differ. tormarchy-panic still exists as a command, which is
+          // where it belongs: its entire purpose is being reachable when the
+          // network is down and this panel is not an option.
           Text {
             visible: tor.lastError !== ""
             width: parent.width

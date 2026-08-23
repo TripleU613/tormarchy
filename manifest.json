@@ -21,7 +21,7 @@
     "defaults": {
       "mode": "lan",
       "refreshIntervalSec": 5,
-      "speedIntervalSec": 20
+      "speedIntervalSec": 3
     },
     "schema": [
       {
@@ -44,12 +44,12 @@
       {
         "key": "speedIntervalSec",
         "type": "integer",
-        "label": "Latency measurement interval (seconds)",
-        "description": "How often to time the circuit while the panel is open. Each measurement is a real request over Tor, so this never runs while the panel is closed.",
-        "min": 5,
-        "max": 600,
-        "step": 5,
-        "defaultValue": 20
+        "label": "Latency interval (seconds)",
+        "description": "How often to re-time the circuit while the panel is open. Measurements share one persistent connection, so each is a single round trip. Never runs while the panel is closed.",
+        "min": 1,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 3
       }
     ]
   }

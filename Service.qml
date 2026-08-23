@@ -51,7 +51,10 @@ Item {
   // beacon with a recognisable shape, which is the last thing a Tor tool should
   // add on the user's behalf without being asked.
   property bool watching: false
-  readonly property int speedIntervalSec: intSetting("speedIntervalSec", 20, 5, 600)
+  // Seconds between readings on the live stream. Small numbers are affordable
+  // now: each tick is one round trip on a connection that is already open, not
+  // a fresh circuit handshake.
+  readonly property int speedIntervalSec: intSetting("speedIntervalSec", 3, 1, 60)
 
   property int latencyMs: 0
   property bool measuringSpeed: false
@@ -97,7 +100,7 @@ Item {
     refreshing = true
     // Via bash so a missing helper is a real exit 127 we can report as
     // "not installed"; a bare argv would just fail to spawn instead.
-    statusProcess.command = ["bash", "-c", "exec tormarchy-status --json"]
+    statusProcess.command = ["bash", "-c", "exec tormarchy status --json"]
     statusProcess.running = true
   }
 
@@ -134,11 +137,11 @@ Item {
   function connect(requestedMode) {
     var target = Model.isValidMode(requestedMode) ? String(requestedMode) : defaultMode
     // SOCKS mode touches no firewall rules, so there is nothing to "connect".
-    run(["tormarchy-connect", target], target === "socks" ? -1 : 1, "Connecting…")
+    run(["tormarchy", "connect", target], target === "socks" ? -1 : 1, qsTr("Connecting…"))
   }
 
   function disconnect() {
-    run(["tormarchy-disconnect"], 0, "Disconnecting…")
+    run(["tormarchy", "disconnect"], 0, qsTr("Disconnecting…"))
   }
 
   function toggleConnected() {
@@ -148,7 +151,7 @@ Item {
 
   function setMode(requestedMode) {
     if (!Model.isValidMode(requestedMode) || String(requestedMode) === mode) return
-    run(["tormarchy-mode", String(requestedMode)], -1, "Switching to " + Model.modeLabel(requestedMode) + "…")
+    run(["tormarchy", "mode", String(requestedMode)], -1, qsTr("Switching to %1…").arg(Model.modeLabel(requestedMode)))
   }
 
   // Unprivileged: NEWNYM over the control port, authenticated with the cookie
@@ -159,7 +162,7 @@ Item {
     latencyMs = 0
     speedError = ""
     latencyHistory = []
-    run(["tormarchy-newnym"], -1, qsTr("Requesting a new circuit…"))
+    run(["tormarchy", "newnym"], -1, qsTr("Requesting a new circuit…"))
     measureAfterChange.restart()
   }
 
@@ -168,7 +171,7 @@ Item {
     measuringSpeed = true
     speedError = ""
     _speedOutput = ""
-    speedProcess.command = ["bash", "-c", "exec tormarchy-speed --json"]
+    speedProcess.command = ["bash", "-c", "exec tormarchy speed --json"]
     speedProcess.running = true
   }
 
@@ -176,19 +179,21 @@ Item {
     if (exitListProcess.running || !torRunning) return
     loadingExitCountries = true
     _exitListOutput = ""
-    exitListProcess.command = ["bash", "-c", "exec tormarchy-exit --list"]
+    exitListProcess.command = ["bash", "-c", "exec tormarchy exit --list"]
     exitListProcess.running = true
   }
 
   function setExit(countryCode) {
     var cc = String(countryCode || "auto")
-    run(["tormarchy-exit", cc], -1, cc === "auto" ? "Clearing exit country…" : "Switching exit to " + cc.toUpperCase() + "…")
+    run(["tormarchy", "exit", cc], -1, cc === "auto"
+      ? qsTr("Clearing exit country…")
+      : qsTr("Switching exit to %1…").arg(cc.toUpperCase()))
   }
 
   // The last resort: tear down every rule unconditionally, for when a wedged
   // ruleset has left the machine with no network to explain itself with.
   function panic() {
-    run(["tormarchy-panic"], 0, "Removing all Tor rules…")
+    run(["tormarchy", "panic"], 0, qsTr("Removing all Tor rules…"))
   }
 
   function run(argv, desired, progress) {
@@ -231,15 +236,41 @@ Item {
     onTriggered: root.refresh()
   }
 
-  Timer {
-    // triggeredOnStart so opening the panel measures immediately rather than
-    // showing a dash for the first interval.
-    id: speedPoll
-    interval: root.speedIntervalSec * 1000
-    repeat: true
-    triggeredOnStart: true
+  // Live latency, streamed from one persistent connection through the circuit.
+  //
+  // A long-running child rather than a timer firing one-shot measurements: the
+  // expensive part of a reading is building the connection, so reusing one and
+  // re-timing it is what makes a live number affordable at all. Quickshell kills
+  // the process when `running` goes false, so closing the panel stops it and
+  // there is no daemon to leak.
+  Process {
+    id: pingProcess
     running: root.watching && root.torRunning
-    onTriggered: root.measureSpeed()
+    command: ["bash", "-c", "exec tormarchy pingd " + root.speedIntervalSec]
+
+    stdout: SplitParser {
+      onRead: function(line) {
+        var ms = parseInt(String(line).trim(), 10)
+        if (!isFinite(ms) || ms <= 0) return
+        root.latencyMs = ms
+        root.speedError = ""
+        root.measuringSpeed = false
+      }
+    }
+
+    stderr: SplitParser {
+      onRead: function(line) {
+        var text = String(line).trim()
+        if (text !== "") root.speedError = Model.elide(text, 120)
+      }
+    }
+
+    onRunningChanged: {
+      // Show the spinner while the first reading is in flight; after that the
+      // stream keeps the number current on its own.
+      if (running && root.latencyMs <= 0) root.measuringSpeed = true
+      else if (!running) root.measuringSpeed = false
+    }
   }
 
   Timer {
