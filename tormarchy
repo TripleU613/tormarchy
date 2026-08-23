@@ -268,10 +268,29 @@ circuit_path() {
   circuits=$(tor_control 'GETINFO circuit-status' 2>/dev/null) || return 1
 
   line=""
+  # PURPOSE=GENERAL is not enough on its own. Tor also builds one-hop internal
+  # circuits for its own directory fetches and tags those GENERAL too, so a
+  # naive "last GENERAL circuit" picks up a single-hop tunnel to a directory
+  # cache and presents it as where your traffic goes. That is how this reported
+  # a one-country path for a three-hop circuit.
+  local newest_ts=0 candidate_created candidate_ts
   while IFS= read -r candidate; do
     [[ $candidate == *" BUILT "* ]] || continue
     [[ $candidate == *"PURPOSE=GENERAL"* ]] || continue
-    line=$candidate
+    [[ $candidate == *"ONEHOP_TUNNEL"* ]] && continue
+    [[ $candidate == *"IS_INTERNAL"* ]] && continue
+
+    # Newest by timestamp rather than by position: circuit-status makes no
+    # promise about ordering, and the newest general circuit is the one
+    # carrying new streams.
+    candidate_created=$(sed -n 's/.*TIME_CREATED=\([^ ]*\).*/\1/p' <<<"$candidate")
+    candidate_ts=0
+    [[ -n $candidate_created ]] &&
+      candidate_ts=$(date -u -d "${candidate_created%%.*}Z" +%s 2>/dev/null || echo 0)
+    if (( candidate_ts >= newest_ts )); then
+      newest_ts=$candidate_ts
+      line=$candidate
+    fi
   done <<<"$circuits"
   [[ -n $line ]] || return 1
 
@@ -313,7 +332,11 @@ circuit_path() {
   for fp in "${fps[@]}"; do queries+=("GETINFO ns/id/\$$fp"); done
   ns=$(tor_control "${queries[@]}" 2>/dev/null) || return 1
   mapfile -t ips < <(awk '/^r /{print $7}' <<<"$ns")
-  (( ${#ips[@]} > 0 )) || return 1
+
+  # Every hop must resolve, or nothing is reported. A partial answer rendered as
+  # a complete path is worse than no answer: two hops shown as the whole circuit
+  # reads as a shorter, weaker path than the one actually in use.
+  (( ${#ips[@]} == ${#fps[@]} )) || return 1
 
   # These replies name the address in the key, so they are matched rather than
   # trusted to arrive in order.
@@ -1388,10 +1411,17 @@ cmd_doctor() {
     # Forwarded traffic never passes the output hook, so none of the rules above
     # apply to it -- and it is invisible from here.
     if [[ $(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null) == 1 ]]; then
-      if (( EUID == 0 )) && nft list chain inet "$NFT_TABLE" filter_forward >/dev/null 2>&1; then
-        pass "IP forwarding is on, but the forward chain is filtering it"
+      if (( EUID == 0 )); then
+        if nft list chain inet "$NFT_TABLE" filter_forward >/dev/null 2>&1; then
+          pass "IP forwarding is on, but the forward chain is dropping it"
+        else
+          fail "IP forwarding is on and the forward chain is MISSING -- routed traffic is leaking"
+        fi
       else
-        warn "IP forwarding is on (a VM, container or hotspot may route through this host); run as root to confirm the forward chain is loaded"
+        # The forward chain is part of every ruleset this tool applies, so if
+        # rules are on it is on. Root can prove it; without root, saying so is
+        # still better than a warning that reads like an open leak.
+        pass "IP forwarding is on, but the applied ruleset always drops forwarded traffic"
       fi
     else
       pass "IP forwarding is off, so nothing routes through this machine"
