@@ -26,6 +26,10 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck libxml2-utils nftables
 
+          # nft resolves `meta skuid "tor"` when it parses the ruleset, so the
+          # account has to exist here for the ruleset to be checkable at all.
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin tor || true
+
       # A tag is what the plugin marketplace and anyone's `omarchy plugin
       # update` will pull, so it has to pass everything before it becomes a
       # release rather than after.

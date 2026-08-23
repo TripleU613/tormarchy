@@ -25,6 +25,13 @@ jobs:
           # the polkit policy and the logo, nftables validates the real ruleset.
           sudo apt-get install -y -qq shellcheck libxml2-utils nftables
 
+          # The ruleset exempts tor's own traffic with `meta skuid "tor"`, and
+          # nft resolves usernames when it parses the file rather than when it
+          # runs. Without this account the ruleset cannot even be checked here,
+          # which is a missing prerequisite on the runner, not a bad rule.
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin tor || true
+          id tor
+
       # Run as root so the nftables check actually happens. It is the only part
       # of the suite needing the kernel, and the part most worth running: the
       # ruleset is what can take someone's network down.
