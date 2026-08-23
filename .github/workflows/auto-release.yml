@@ -52,6 +52,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.check.outputs.version }}
         run: |
+          # An annotated tag records a tagger, so it needs an identity even
+          # though nothing is being committed. A runner has none by default.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git tag -a "v$VERSION" -m "v$VERSION"
           git push origin "v$VERSION"
           # Notes come from merged pull requests, so contributors get credited
