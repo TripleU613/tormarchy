@@ -105,6 +105,59 @@ is_valid_mode() {
   return 1
 }
 
+# The bounded size of a cache entry. The format is one short tab-separated
+# line; anything past this is not a cache this program wrote.
+CACHE_BYTE_LIMIT=4096
+
+# A private, owner-only directory for cache state, or failure when none can be
+# guaranteed. There is deliberately no /tmp fallback: these entries are
+# rewritten on every panel refresh, and in a shared directory the name is both
+# globally predictable and plantable, so one symlink left in place turns every
+# refresh into a write into a file of someone else's choosing. Without a
+# runtime directory the callers simply pay the lookup cost again rather than
+# write somewhere unsafe.
+runtime_dir() {
+  local base=${XDG_RUNTIME_DIR:-} dir
+  [[ -n $base && ! -L $base && -d $base && -O $base ]] || return 1
+  dir="$base/tormarchy"
+  [[ -L $dir ]] && return 1
+  # No -p: $base is already known to exist, and an existing $dir is tolerated
+  # rather than assumed correct.
+  mkdir -m 0700 -- "$dir" 2>/dev/null || [[ -d $dir ]] || return 1
+  # Re-tested after the mkdir, because $dir may have existed already --
+  # including as one another account created first with looser modes.
+  [[ ! -L $dir && -d $dir && -O $dir ]] || return 1
+  chmod 0700 -- "$dir" 2>/dev/null || return 1
+  printf '%s' "$dir"
+}
+
+# The first line of a cache entry, but only when it is a regular file this user
+# owns. A symlink, a directory, a device node, or a file dropped by another
+# account is ignored rather than read. The read is bounded so an entry someone
+# replaced with an enormous file cannot be pulled into memory.
+read_cache_line() {
+  local path=$1 line
+  [[ ! -L $path && -f $path && -O $path && -r $path ]] || return 1
+  IFS= read -r line < <(head -c "$CACHE_BYTE_LIMIT" -- "$path" 2>/dev/null)
+  [[ -n $line ]] || return 1
+  printf '%s' "$line"
+}
+
+# Replace a cache entry in one step. mktemp creates a fresh regular file in the
+# same private directory (O_EXCL, mode 0600) and the rename swaps it in, so the
+# write can never follow a symlink and a concurrent reader sees either the old
+# line or the new one, never a half-written one.
+write_cache() {
+  local path=$1 content=$2 tmp
+  tmp=$(mktemp -- "$path.XXXXXX" 2>/dev/null) || return 1
+  if printf '%s' "$content" >"$tmp" 2>/dev/null \
+    && mv -f -- "$tmp" "$path" 2>/dev/null; then
+    return 0
+  fi
+  rm -f -- "$tmp" 2>/dev/null
+  return 1
+}
+
 # sudo when there is a terminal to type into, pkexec otherwise. Called from the
 # shell there is no tty, so this raises Omarchy's own polkit dialog rather than
 # failing silently or spawning a terminal.
@@ -270,7 +323,10 @@ bootstrap_progress() {
 # Resolving costs a fingerprint lookup and a GeoIP lookup per hop, so the answer
 # is cached against the circuit id: a path only changes when the circuit does.
 circuit_path() {
-  local cache="${XDG_RUNTIME_DIR:-/tmp}/tormarchy-path.cache"
+  # Empty when no private runtime directory can be guaranteed. The path is
+  # then resolved fresh on each call rather than cached in a shared location.
+  local cache="" cache_dir
+  cache_dir=$(runtime_dir) && cache="$cache_dir/path.cache"
   local circuits line id created path
 
   circuits=$(tor_control 'GETINFO circuit-status' 2>/dev/null) || return 1
@@ -314,9 +370,9 @@ circuit_path() {
     (( age < 0 )) && age=0
   fi
 
-  if [[ -r $cache ]]; then
-    local cached_id cached_ip cached_ccs
-    IFS=$'\t' read -r cached_id cached_ip cached_ccs <"$cache"
+  local cached_line cached_id cached_ip cached_ccs
+  if [[ -n $cache ]] && cached_line=$(read_cache_line "$cache"); then
+    IFS=$'\t' read -r cached_id cached_ip cached_ccs <<<"$cached_line"
     if [[ $cached_id == "$id" && -n $cached_ccs ]]; then
       printf '%s\t%s\t%s\t%s' "$id" "$age" "$cached_ip" "$cached_ccs"
       return 0
@@ -359,7 +415,11 @@ circuit_path() {
   done
 
   local exit_ip="${ips[-1]}"
-  printf '%s\t%s\t%s' "$id" "$exit_ip" "$ccs" >"$cache" 2>/dev/null || true
+  if [[ -n $cache ]]; then
+    # Best effort: the cache is an optimisation, and failing to store it must
+    # not fail a lookup that already succeeded.
+    write_cache "$cache" "$id"$'\t'"$exit_ip"$'\t'"$ccs" || true
+  fi
   printf '%s\t%s\t%s\t%s' "$id" "$age" "$exit_ip" "$ccs"
 }
 
@@ -1644,8 +1704,18 @@ cmd_setup() {
   fi
 
   step "Verifying the tor config"
-  tor --verify-config -f "$TORRC" >/tmp/tormarchy-verify.log 2>&1 \
-    || { cat /tmp/tormarchy-verify.log >&2; die "tor rejected the configuration; nothing has been started"; }
+  # This runs as root, so a fixed /tmp name is a symlink anyone can plant and
+  # the redirect would truncate whatever it points at. mktemp creates the file
+  # itself with O_EXCL, so it fails rather than follows.
+  local verify_log
+  verify_log=$(mktemp -- "${TMPDIR:-/tmp}/tormarchy-verify.XXXXXX") \
+    || die "could not create a temporary file to verify the tor config"
+  if ! tor --verify-config -f "$TORRC" >"$verify_log" 2>&1; then
+    cat -- "$verify_log" >&2
+    rm -f -- "$verify_log"
+    die "tor rejected the configuration; nothing has been started"
+  fi
+  rm -f -- "$verify_log"
   echo "  config is valid"
 
   step "Control port access"
