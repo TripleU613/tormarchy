@@ -9,12 +9,35 @@
 
 ---
 
-Needs Omarchy 4.x.
+Needs Omarchy 4.x. Everything else it uses is already on an Arch box —
+`nftables`, `systemd`, `polkit`, `curl`, `iproute2`. `setup` installs `tor`
+itself. Bridges additionally want `obfs4proxy` (AUR) or `meek`, and it'll tell
+you which if you need them.
+
+## Install
 
 ```bash
 omarchy plugin add https://github.com/TripleU613/tormarchy.git --enable
 sudo ~/.config/omarchy/plugins/usher.tor/tormarchy setup
 ```
+
+`setup` needs a terminal and tells you everything it touches as it goes. For the
+record, that's: `tor` installed, `tormarchy` copied to `/usr/local/bin`, a config
+snippet in `/etc/tor/torrc.d/`, one line added to `/etc/tor/torrc`, a polkit rule
+so the toggle doesn't ask for a password, your user added to the `tor` group, and
+`/var/lib/tor` loosened to `0750` so it can read Tor's control cookie. It doesn't
+touch your Firefox or browser profiles — browser mode makes its own.
+
+## Removing it
+
+```bash
+sudo ~/.config/omarchy/plugins/usher.tor/tormarchy uninstall
+omarchy plugin remove usher.tor
+```
+
+`uninstall` puts all of the above back, including `/var/lib/tor`, and takes the
+firewall rules down first so you can't end up without a network. Add `--purge` to
+also drop the `tor` package and your group membership.
 
 ## Modes
 
