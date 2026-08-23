@@ -2,10 +2,6 @@
   <img src="assets/logo.svg" alt="Tormarchy" width="340">
 </p>
 
-<p align="center">
-  A Tor toggle for the Omarchy bar. Click the onion, all your traffic goes
-  through Tor. Click it again, it doesn't.
-</p>
 
 <p align="center">
   <img alt="Connected" width="46%" src="https://github.com/user-attachments/assets/f670dd75-11cd-498e-96b9-0e8a0ca544ae" />
@@ -49,6 +45,12 @@ already knows you are. If you were logged in before you connected, you're still
 logged in.
 
 ## Panel
+
+
+<p align="center">
+  A Tor toggle for the Omarchy bar. Click the onion, all your traffic goes
+  through Tor. Click it again, it doesn't.
+</p>
 
 Left click opens it, right click toggles, middle click gets a new circuit.
 
