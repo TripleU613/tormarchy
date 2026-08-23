@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "usher.tor",
   "name": "Tormarchy",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "author": "usher",
   "license": "MIT",
   "description": "Route all system traffic through Tor from the Omarchy bar, with a real kill switch, new circuits, and exit-country selection.",
@@ -28,7 +28,11 @@
         "key": "mode",
         "type": "enum",
         "label": "Default mode",
-        "options": ["lan", "strict", "socks"],
+        "options": [
+          "lan",
+          "strict",
+          "socks"
+        ],
         "defaultValue": "lan",
         "description": "lan: all WAN through Tor, local network still reachable. strict: local network dropped too. socks: no system-wide change, apps opt in to the SOCKS proxy on 9050."
       },
