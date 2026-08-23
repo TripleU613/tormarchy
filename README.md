@@ -2,9 +2,9 @@
   <img src="assets/logo.svg" alt="Tormarchy" width="340">
 </p>
 
-
 <p align="center">
-  <img alt="Connected" width="46%" src="https://github.com/user-attachments/assets/f670dd75-11cd-498e-96b9-0e8a0ca544ae" />
+  A Tor toggle for the Omarchy bar. Click the onion, all your traffic goes
+  through Tor. Click it again, it doesn't.
 </p>
 
 Needs Omarchy 4.x.
@@ -48,9 +48,10 @@ logged in.
 
 
 <p align="center">
-  A Tor toggle for the Omarchy bar. Click the onion, all your traffic goes
-  through Tor. Click it again, it doesn't.
+  <img alt="Connected" width="46%" src="https://github.com/user-attachments/assets/f670dd75-11cd-498e-96b9-0e8a0ca544ae" />
 </p>
+
+
 
 Left click opens it, right click toggles, middle click gets a new circuit.
 
