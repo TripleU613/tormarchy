@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+  # So a contributor can re-run a check after an unrelated fix, without having
+  # to push an empty commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update -qq
+          # shellcheck lints the dispatcher, libxml2-utils provides xmllint for
+          # the polkit policy and the logo, nftables validates the real ruleset.
+          sudo apt-get install -y -qq shellcheck libxml2-utils nftables
+
+      # Run as root so the nftables check actually happens. It is the only part
+      # of the suite needing the kernel, and the part most worth running: the
+      # ruleset is what can take someone's network down.
+      - name: Run checks
+        run: sudo -E .github/scripts/check.sh
