@@ -18,7 +18,7 @@ you which if you need them.
 
 ```bash
 omarchy plugin add https://github.com/TripleU613/tormarchy.git --enable
-sudo ~/.config/omarchy/plugins/usher.tor/tormarchy setup
+sudo ~/.config/omarchy/plugins/tripleu.tor/tormarchy setup
 ```
 
 `setup` needs a terminal and tells you everything it touches as it goes. For the
@@ -31,8 +31,8 @@ touch your Firefox or browser profiles — browser mode makes its own.
 ## Removing it
 
 ```bash
-sudo ~/.config/omarchy/plugins/usher.tor/tormarchy uninstall
-omarchy plugin remove usher.tor
+sudo ~/.config/omarchy/plugins/tripleu.tor/tormarchy uninstall
+omarchy plugin remove tripleu.tor
 ```
 
 `uninstall` puts all of the above back, including `/var/lib/tor`, and takes the

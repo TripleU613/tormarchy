@@ -24,8 +24,8 @@ skipped otherwise, and it's the part that matters most.
 ## Working on it
 
 ```bash
-ln -s "$PWD" ~/.config/omarchy/plugins/usher.tor
-omarchy plugin enable usher.tor
+ln -s "$PWD" ~/.config/omarchy/plugins/tripleu.tor
+omarchy plugin enable tripleu.tor
 ```
 
 Saving a file does **not** hot-reload. Omarchy watches

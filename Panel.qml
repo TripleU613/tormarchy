@@ -7,8 +7,8 @@ import "Model.js" as Model
 
 Panel {
   id: root
-  moduleName: "usher.tor"
-  ipcTarget: "usher.tor"
+  moduleName: "tripleu.tor"
+  ipcTarget: "tripleu.tor"
   manageIpc: false
 
   property string focusSection: "header"  // "setup" | "header" | "newnym" | "exit" | "speed" | "mode"

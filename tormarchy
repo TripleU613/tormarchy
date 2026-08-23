@@ -1765,7 +1765,7 @@ cmd_uninstall() {
   Tormarchy's system side is removed and networking is untouched.
   The plugin itself is still in the bar; remove it with:
 
-    omarchy plugin disable usher.tor
+    omarchy plugin disable tripleu.tor
 DONE
 }
 
