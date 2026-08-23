@@ -1,12 +1,17 @@
-<img width="588" height="378" alt="image" src="https://github.com/user-attachments/assets/ee26e379-79d6-496c-872a-3cf4bac77bee" />
+<p align="center">
+  <img src="assets/logo.svg" alt="Tormarchy" width="340">
+</p>
 
-<img width="586" height="455" alt="image" src="https://github.com/user-attachments/assets/f670dd75-11cd-498e-96b9-0e8a0ca544ae" />
+<p align="center">
+  A Tor toggle for the Omarchy bar. Click the onion, all your traffic goes
+  through Tor. Click it again, it doesn't.
+</p>
 
-
-# Tormarchy
-
-A Tor toggle for the Omarchy bar. Click the onion, all your traffic goes through
-Tor. Click it again, it doesn't.
+<p align="center">
+  <img alt="Disconnected" width="46%" src="https://github.com/user-attachments/assets/ee26e379-79d6-496c-872a-3cf4bac77bee" />
+  &nbsp;
+  <img alt="Connected" width="46%" src="https://github.com/user-attachments/assets/f670dd75-11cd-498e-96b9-0e8a0ca544ae" />
+</p>
 
 Needs Omarchy 4.x.
 
