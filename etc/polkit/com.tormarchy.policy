@@ -30,7 +30,7 @@
 -->
 <policyconfig>
   <vendor>Tormarchy</vendor>
-  <vendor_url>https://github.com/usher/tormarchy</vendor_url>
+  <vendor_url>https://github.com/TripleU613/tormarchy</vendor_url>
 
   <action id="com.tormarchy.manage">
     <description>Manage Tor routing</description>

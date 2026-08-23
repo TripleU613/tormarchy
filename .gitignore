@@ -1,3 +1,6 @@
 *.qmlc
 *.jsc
 .qmlls.ini
+
+# Claude Code local settings -- machine-specific permissions, not project config.
+.claude/

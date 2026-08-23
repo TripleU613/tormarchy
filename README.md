@@ -3,20 +3,22 @@
 Route **all** system traffic through Tor from the Omarchy bar. One click to
 connect, a real kill switch, new circuits on demand, and exit-country choice.
 
-> Status: early. The bar widget is in place; the privileged helpers it drives
-> are landing next. See [PLAN.md](PLAN.md).
-
 Requires Omarchy 4.x (the Quickshell `omarchy-shell`).
 
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/<you>/tormarchy.git --enable
-sudo ~/.config/omarchy/plugins/usher.tor/setup
+omarchy plugin add https://github.com/TripleU613/tormarchy.git --enable
+sudo ~/.config/omarchy/plugins/usher.tor/tormarchy setup
 ```
 
-`setup` installs `tor`, drops the privileged helpers into `/usr/local/bin`, and
-registers a polkit action so connecting is one bar click and one auth prompt.
+`setup` installs `tor`, puts the `tormarchy` command in `/usr/local/bin`, and
+registers a polkit action so connecting is one bar click and no password.
+
+It runs from a terminal only — `setup` and `uninstall` refuse to run through
+polkit, because the single polkit action pins the program path and not its
+arguments, so a passwordless grant for connecting would otherwise cover
+uninstalling too.
 
 ## Modes
 
@@ -122,12 +124,22 @@ omarchy-shell shell rescanPlugins
 omarchy plugin enable usher.tor
 ```
 
-Saved files under `~/.config/omarchy/plugins/` hot-reload. Before committing:
+Note that saving a file **does not** hot-reload here. Omarchy watches
+`~/.config/omarchy/plugins/`, and a symlinked checkout means edits happen at the
+link's target, so the watcher never fires and `rescanPlugins` has nothing to
+pick up. Use `omarchy-restart-shell` after every change.
+
+Before committing:
 
 ```bash
+bash -n tormarchy                        # 1200 lines, one typo away from silent
+xmllint --noout etc/polkit/com.tormarchy.policy
 omarchy plugin validate .
-qmllint -I "$OMARCHY_PATH/shell" *.qml   # needs qt6-declarative
+sudo ./tormarchy connect --dry-run strict | sudo nft -c -f -
 ```
+
+That last one matters most: the ruleset is the part that can take your network
+down, and `nft -c` checks it against the kernel without applying anything.
 
 ## Credits
 
