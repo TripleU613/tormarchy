@@ -231,12 +231,17 @@ group "Firewall ruleset"
 
 # These assertions are regression tests for leaks that were actually shipped,
 # not hypotheticals. Each one names the bug it guards against.
+# Judged on output, not exit code. Run as root, --dry-run also validates against
+# the kernel and exits non-zero when that is unavailable (a CI runner has no
+# netlink access), even though the ruleset printed perfectly well. Generation and
+# validation are separate questions, so they get separate checks.
 for mode in strict lan socks; do
-  if ! ./tormarchy connect --dry-run "$mode" >"/tmp/ruleset-$mode.nft" 2>/dev/null; then
-    fail "could not generate the $mode ruleset"
-    continue
+  ./tormarchy connect --dry-run "$mode" >"/tmp/ruleset-$mode.nft" 2>/dev/null || true
+  if grep -q "table inet tormarchy" "/tmp/ruleset-$mode.nft" 2>/dev/null; then
+    pass "$mode ruleset generates"
+  else
+    fail "the $mode ruleset came out empty or malformed"
   fi
-  pass "$mode ruleset generates"
 done
 
 ruleset=/tmp/ruleset-lan.nft
@@ -285,14 +290,24 @@ done
 
 # nft can only validate against the kernel, so this is root-only and skipped
 # elsewhere rather than faked.
-if command -v nft >/dev/null 2>&1 && (( EUID == 0 )); then
-  for mode in strict lan; do
-    nft -c -f "/tmp/ruleset-$mode.nft" 2>/dev/null \
-      && pass "nft accepts the $mode ruleset" \
-      || fail "nft rejects the $mode ruleset"
-  done
-else
+if ! command -v nft >/dev/null 2>&1; then
+  note "nft not installed, skipping ruleset validation"
+elif (( EUID != 0 )); then
   note "nft check needs root, skipping (run: sudo .github/scripts/check.sh)"
+elif ! nft list ruleset >/dev/null 2>&1; then
+  # Probe first. A container or CI runner can have the nft binary with no
+  # netlink access, and reporting that as "nft rejects the ruleset" would blame
+  # the ruleset for the sandbox.
+  note "nft cannot reach netlink here (container or restricted runner), skipping"
+else
+  for mode in strict lan; do
+    if nft -c -f "/tmp/ruleset-$mode.nft" 2>/dev/null; then
+      pass "nft accepts the $mode ruleset"
+    else
+      nft -c -f "/tmp/ruleset-$mode.nft" 2>&1 | head -3
+      fail "nft rejects the $mode ruleset"
+    fi
+  done
 fi
 
 # --------------------------------------------------------------------- shape --
