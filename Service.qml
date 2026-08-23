@@ -1,5 +1,4 @@
 import QtQuick
-import Quickshell
 import Quickshell.Io
 import qs.Commons
 import "Model.js" as Model
@@ -36,8 +35,6 @@ Item {
   property string actionStatus: ""
   property string lastError: ""
 
-  // Countries Tor currently has usable exit relays in. Loaded on demand, not
-  // polled: it costs a walk of the whole consensus, and it barely changes.
   // Latency through the circuit. Measured on a timer, but only while the panel
   // is actually on screen -- see `watching`.
   //
@@ -63,6 +60,8 @@ Item {
   // Every measurement taken this session, capped to what the sparkline shows.
   property var latencyHistory: []
 
+  // Countries Tor currently has usable exit relays in. Loaded on demand, not
+  // polled: it costs a walk of the whole consensus, and it barely changes.
   property var exitCountries: []
   property bool loadingExitCountries: false
   property bool exitCountriesLoaded: false
