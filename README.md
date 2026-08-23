@@ -97,7 +97,10 @@ The onion only lights up once traffic is actually going through Tor.
 | `tormarchy bridge` | For networks that block Tor. |
 | `tormarchy browser` | Launch a browser locked to Tor. |
 | `tormarchy doctor` | Check for leaks. |
+| `tormarchy boot enable` | Reconnect at boot if Tor was on when you shut down. Off by default. |
 | `tormarchy panic` | Rip out every rule. For when things go wrong. |
+
+Tab completion for all of it, bash and zsh, installed by `setup`.
 
 ## If it breaks
 
@@ -106,6 +109,11 @@ them. That's on purpose — a kill switch that fails open isn't one. Toggle it o
 or run `tormarchy panic`.
 
 Nothing survives a reboot, so restarting always gets your network back.
+
+That's also why `tormarchy boot enable` is opt-in rather than the default —
+turning it on trades a little of that guarantee for not having to reconnect
+after every restart. It only reconnects if Tor was on when you shut down, and if
+the network isn't there or Tor can't bootstrap it applies no rules at all.
 
 ## License
 

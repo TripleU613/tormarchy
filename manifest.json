@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "usher.tor",
   "name": "Tormarchy",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "usher",
   "license": "MIT",
   "description": "Route all system traffic through Tor from the Omarchy bar, with a real kill switch, new circuits, and exit-country selection.",
@@ -16,6 +16,19 @@
     "displayName": "Tor",
     "description": "Toggle system-wide Tor, request a new circuit, pick an exit country, and test circuit speed.",
     "category": "Network",
+    "aliases": [
+      "tor",
+      "onion",
+      "privacy",
+      "anonymity",
+      "vpn",
+      "proxy",
+      "socks",
+      "bridge",
+      "exit node",
+      "kill switch",
+      "firewall"
+    ],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {

@@ -8,7 +8,7 @@ Item {
 
   property var settings: ({})
 
-  // Truth from tormarchy-status --json.
+  // Truth from `tormarchy status --json`.
   property bool installed: false
   property bool torRunning: false
   property bool connected: false

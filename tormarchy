@@ -65,10 +65,18 @@ TORRC_BRIDGES="$TORRC_DIR/20-tormarchy-bridges.conf"
 
 BRIDGE_STASH="/etc/tormarchy/bridges.stash"
 
+# Survives a reboot, unlike everything in /run. Only written when the boot
+# receiver is enabled, so a machine that never opted in has nothing to resume.
+PERSIST_DIR="/var/lib/tormarchy"
+RECONNECT_MARKER="$PERSIST_DIR/reconnect"
+BOOT_UNIT="/etc/systemd/system/tormarchy-boot.service"
+
 BIN_DIR=/usr/local/bin
 POLKIT_ACTIONS=/usr/share/polkit-1/actions
 POLKIT_RULES=/etc/polkit-1/rules.d
 TMPFILES_DIR=/etc/tmpfiles.d
+BASH_COMPLETION=/usr/share/bash-completion/completions
+ZSH_COMPLETION=/usr/share/zsh/site-functions
 
 VALID_MODES=(lan strict socks)
 
@@ -541,6 +549,19 @@ ipv6_restore() {
   rm -f "$IPV6_STATE_FILE"
 }
 
+# The boot receiver reads this marker to decide whether to reconnect. Only
+# touched while the receiver is enabled: without it, connecting leaves no trace
+# that outlives the session, which is the default and the safer one.
+remember_connected() {
+  [[ -f $BOOT_UNIT ]] || return 0
+  install -d -m 0755 "$PERSIST_DIR" 2>/dev/null || return 0
+  : >"$RECONNECT_MARKER" 2>/dev/null || true
+}
+
+forget_connected() {
+  rm -f "$RECONNECT_MARKER" 2>/dev/null || true
+}
+
 write_state() {
   local mode="$1" active="$2" staging
   install -d -m 0755 "$STATE_DIR"
@@ -713,6 +734,7 @@ cmd_connect() {
     flush_rules
     ipv6_restore
     write_state socks no
+    forget_connected
     cat <<DONE
 Tor is running. SOCKS proxy on 127.0.0.1:$SOCKS_PORT. Nothing is routed
 system-wide, so the rest of the machine is untouched.
@@ -779,6 +801,7 @@ NOTE
   ipv6_disable || echo "note: could not turn off the IPv6 stack; the ruleset still drops IPv6" >&2
 
   write_state "$mode" yes
+  remember_connected
   echo "Connected. All traffic now routes through Tor ($mode mode)."
 }
 
@@ -791,6 +814,8 @@ cmd_disconnect() {
   ipv6_restore
   systemctl stop tor.service 2>/dev/null || true
   rm -rf "$STATE_DIR"
+  # Deliberate disconnect means do not come back on the next boot.
+  forget_connected
   echo "Disconnected from Tor."
 }
 
@@ -799,6 +824,9 @@ cmd_panic() {
   flush_rules
   ipv6_restore
   rm -rf "$STATE_DIR"
+  # The escape hatch also cancels the boot reconnect. Someone reaching for panic
+  # does not want the machine to put the rules straight back an hour later.
+  forget_connected
   echo "Removed all Tormarchy rules. Networking is back to normal."
 }
 
@@ -1444,6 +1472,73 @@ cmd_doctor() {
   (( failures == 0 )) && echo "No problems found." || { echo "$failures problem(s) found."; return 1; }
 }
 
+# ---- boot receiver ----
+
+cmd_boot() {
+  case "${1:-status}" in
+  status)
+    if [[ -f $BOOT_UNIT ]]; then
+      local enabled
+      enabled=$(systemctl is-enabled tormarchy-boot.service 2>/dev/null || echo unknown)
+      echo "Boot reconnect: installed ($enabled)"
+      [[ -f $RECONNECT_MARKER ]] \
+        && echo "  Tor was on when last connected, so it will reconnect at boot" \
+        || echo "  not currently armed -- connect once and it will be"
+    else
+      echo "Boot reconnect: off"
+      echo "  enable with: sudo tormarchy boot enable"
+    fi
+    ;;
+  enable)
+    require_terminal_root
+    local repo_dir
+    repo_dir=$(dirname "$SELF")
+    [[ -f $repo_dir/etc/systemd/tormarchy-boot.service ]] \
+      || die "cannot find etc/systemd/tormarchy-boot.service next to $SELF"
+
+    install -m 0644 "$repo_dir/etc/systemd/tormarchy-boot.service" "$BOOT_UNIT"
+    systemctl daemon-reload
+    systemctl enable tormarchy-boot.service >/dev/null 2>&1 \
+      || die "installed the unit but could not enable it"
+
+    # Arm it now if Tor is already on, so enabling mid-session behaves the way
+    # anyone would expect rather than waiting for the next reconnect.
+    rules_present && remember_connected
+
+    cat <<DONE
+Boot reconnect is on.
+
+At boot, if Tor was on when the machine went down, it reconnects. If the network
+is unreachable or Tor cannot bootstrap, no rules are applied and the machine
+comes up with ordinary networking -- connect never applies a ruleset it has not
+verified.
+
+Worth knowing what this costs: nothing else here survives a reboot, so
+restarting has been the guaranteed way out of a wedged firewall. This trades a
+little of that for convenience. Turn it back off with:
+
+  sudo tormarchy boot disable
+DONE
+    ;;
+  disable)
+    require_terminal_root
+    systemctl disable tormarchy-boot.service >/dev/null 2>&1 || true
+    rm -f "$BOOT_UNIT"
+    systemctl daemon-reload
+    forget_connected
+    echo "Boot reconnect is off. A reboot always comes up with normal networking."
+    ;;
+  *)
+    cat <<USAGE
+Usage: tormarchy boot <status|enable|disable>
+
+Reconnects at boot if Tor was on when the machine went down. Off by default,
+because a reboot is otherwise the guaranteed way out of a wedged firewall.
+USAGE
+    ;;
+  esac
+}
+
 # ---- install / remove ----
 
 cmd_setup() {
@@ -1501,6 +1596,20 @@ cmd_setup() {
   systemctl is-failed tor.service >/dev/null 2>&1 && {
     systemctl reset-failed tor.service; echo "  cleared a previous failed start"
   }
+
+  step "Installing shell completion"
+  # Sixteen subcommands, several with their own verbs, and two that complete
+  # from live state (installed browsers, countries with exits). Worth having.
+  if [[ -d $(dirname "$BASH_COMPLETION") ]]; then
+    install -d -m 0755 "$BASH_COMPLETION"
+    install -m 0644 "$repo_dir/etc/completion/tormarchy.bash" "$BASH_COMPLETION/tormarchy"
+    echo "  $BASH_COMPLETION/tormarchy"
+  fi
+  if [[ -d /usr/share/zsh ]]; then
+    install -d -m 0755 "$ZSH_COMPLETION"
+    install -m 0644 "$repo_dir/etc/completion/_tormarchy" "$ZSH_COMPLETION/_tormarchy"
+    echo "  $ZSH_COMPLETION/_tormarchy"
+  fi
 
   step "Installing the polkit policy"
   # Check before installing. An unparseable policy is the worst kind of broken:
@@ -1591,6 +1700,19 @@ cmd_uninstall() {
   ipv6_restore
   rm -rf "$STATE_DIR"
 
+  # Before tor stops and before the binary goes: a boot unit left behind would
+  # try to reconnect on the next boot with nothing installed to do it.
+  step "Removing the boot receiver"
+  if [[ -f $BOOT_UNIT ]]; then
+    systemctl disable tormarchy-boot.service >/dev/null 2>&1 || true
+    rm -f "$BOOT_UNIT"
+    systemctl daemon-reload
+    echo "  removed and disabled"
+  else
+    echo "  was not installed"
+  fi
+  rm -rf "$PERSIST_DIR"
+
   step "Stopping tor"
   systemctl stop tor.service 2>/dev/null || true
   systemctl disable tor.service 2>/dev/null || true
@@ -1604,7 +1726,8 @@ cmd_uninstall() {
   rm -rf /usr/local/lib/tormarchy
   rm -f "$TORRC_BASE" "$TORRC_EXIT" "$TORRC_BRIDGES"
   rm -f "$POLKIT_ACTIONS/com.tormarchy.policy" "$POLKIT_RULES/49-tormarchy.rules"
-  echo "  helpers, torrc snippets and polkit files"
+  rm -f "$BASH_COMPLETION/tormarchy" "$ZSH_COMPLETION/_tormarchy"
+  echo "  helpers, torrc snippets, polkit files and completion"
 
   # Only touch the include if our own marker is above it: the tor package may
   # ship that same line, and stripping a directive we did not add would break
@@ -1667,6 +1790,7 @@ tormarchy -- route traffic through Tor, from the Omarchy bar.
   speed [--json]                           One latency measurement.
   pingd [seconds]                          Stream live latency, one per line.
   doctor                                   Leak checks.
+  boot <status|enable|disable>             Reconnect at boot if Tor was on.
   panic                                    Remove every rule. The escape hatch.
   setup / uninstall [--purge]              Install or remove the system side.
                                            Terminal + sudo only.
@@ -1695,6 +1819,7 @@ speed)      cmd_speed "$@" ;;
 pingd)      cmd_pingd "$@" ;;
 doctor)     cmd_doctor "$@" ;;
 panic)      cmd_panic "$@" ;;
+boot)       cmd_boot "$@" ;;
 setup)      cmd_setup "$@" ;;
 uninstall)  cmd_uninstall "$@" ;;
 help | -h | --help) cmd_help ;;

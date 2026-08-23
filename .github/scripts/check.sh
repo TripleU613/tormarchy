@@ -312,6 +312,19 @@ fi
 
 # --------------------------------------------------------------------- shape --
 
+group "Name collisions"
+
+# A property that shadows a base-type name either fails to load or, worse,
+# silently stops the widget responding. Neither is caught until the shell tries
+# to load the plugin.
+python3 tests/test_qml_names.py || failures=$(( failures + 1 ))
+
+group "Pinned decisions"
+
+# Behaviour that cannot be exercised without a running shell and a root-owned
+# firewall, pinned at the source level instead.
+bash tests/test_decisions.sh || failures=$(( failures + 1 ))
+
 group "Commands"
 
 missing=""

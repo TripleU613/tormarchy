@@ -1,0 +1,57 @@
+#compdef tormarchy
+# Managed by tormarchy. Zsh completion.
+
+_tormarchy() {
+  local -a subs
+  subs=(
+    'connect:Route traffic through Tor'
+    'disconnect:Remove the rules and stop tor'
+    'mode:Change mode, live if connected'
+    'status:Current state'
+    'ip:Circuit path and exit, read from the control port'
+    'newnym:New circuit'
+    'exit:Pin or clear the exit country'
+    'bridge:Use bridges where Tor is blocked'
+    'browser:Launch a browser locked to Tor'
+    'speed:One latency measurement'
+    'pingd:Stream live latency'
+    'doctor:Leak checks'
+    'panic:Remove every rule'
+    'boot:Reconnect at boot'
+    'setup:Install the system side'
+    'uninstall:Remove the system side'
+    'help:Show usage'
+  )
+
+  if (( CURRENT == 2 )); then
+    _describe 'command' subs
+    return
+  fi
+
+  case "${words[2]}" in
+    connect)   _values 'arg' '--dry-run' 'lan' 'strict' 'socks' ;;
+    mode)      _values 'mode' 'lan' 'strict' 'socks' ;;
+    bridge)    _values 'verb' 'status' 'set' 'on' 'off' 'transports' ;;
+    boot)      _values 'verb' 'status' 'enable' 'disable' ;;
+    status|speed|ip) _values 'flag' '--json' ;;
+    uninstall) _values 'flag' '--purge' ;;
+    exit)
+      local -a ccs
+      # Only ask Tor when it is running, so completion cannot hang on a control
+      # port that is not listening.
+      if systemctl is-active --quiet tor.service 2>/dev/null; then
+        ccs=(auto --list ${(f)"$(tormarchy exit --list 2>/dev/null)"})
+      else
+        ccs=(auto --list)
+      fi
+      _values 'country' $ccs
+      ;;
+    browser)
+      local -a browsers
+      browsers=(--list ${(f)"$(tormarchy browser --list 2>/dev/null | awk '{print $1}')"})
+      _values 'browser' $browsers
+      ;;
+  esac
+}
+
+_tormarchy "$@"

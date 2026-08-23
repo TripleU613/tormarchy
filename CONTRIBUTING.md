@@ -59,13 +59,24 @@ networking. Please keep both of those true.
 
 ## Releases
 
-Tag it. The release workflow refuses to publish if the tag and the `version` in
-`manifest.json` disagree.
+Automatic. Enable the hook once per clone:
 
 ```bash
-# bump "version" in manifest.json first
-git tag v1.0.0 && git push origin v1.0.0
+make hooks
 ```
+
+After that, committing anything that changes what ships bumps the patch version,
+and pushing to master tags it and publishes a release. Docs-only commits don't
+bump, so they don't produce a release.
+
+For a minor or major version, edit `version` in `manifest.json` yourself — the
+hook only touches the patch field, and it leaves a hand-set version alone if it
+has no tag yet.
+
+The bump happens at commit time rather than in a workflow because the release job
+runs as the Actions bot, which has write access but isn't an administrator, and
+branch protection requires the Checks status before anything lands on master. A
+bot-authored bump gets rejected every time.
 
 ## Style
 

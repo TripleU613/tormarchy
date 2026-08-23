@@ -1,0 +1,36 @@
+# Managed by tormarchy. Installed by `tormarchy boot enable`, removed by disable.
+#
+# Reconnects at boot, but only if Tor was on when the machine went down. The
+# marker for that lives in /var/lib/tormarchy, because /run is cleared on boot
+# and the whole point is surviving one.
+#
+# This is opt-in for a reason. Nothing else in this tool persists across a
+# reboot: the ruleset is never written to /etc/nftables.conf, so restarting has
+# always been the guaranteed way out of a wedged firewall. Enabling this trades
+# some of that guarantee for convenience, and it should be a decision rather
+# than a default.
+#
+# What keeps it safe: `tormarchy connect` applies rules only after Tor reports a
+# full bootstrap. If the network is unreachable at boot, or Tor cannot start, no
+# rules are applied and the machine comes up with ordinary networking.
+
+[Unit]
+Description=Reconnect Tormarchy if Tor was on at shutdown
+Documentation=https://github.com/TripleU613/tormarchy
+# Tor needs a route before it can bootstrap, so waiting for the network is not
+# optional here.
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/tormarchy/reconnect
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=/usr/local/bin/tormarchy connect
+# A failure here must not cascade. Networking is untouched when connect gives
+# up, and a boot should not be held back by it.
+TimeoutStartSec=180
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target

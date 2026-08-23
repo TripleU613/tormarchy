@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#
+# Bumps the patch version whenever a commit touches anything but the manifest.
+#
+# Why here and not in a workflow: the release job runs as the Actions bot, which
+# has write access but is not an administrator, and branch protection requires
+# the Checks status before anything lands on master. A bot-authored version bump
+# is therefore rejected every time. Doing it at commit time sidesteps that
+# entirely -- the bump is part of the commit that gets reviewed and pushed.
+#
+# The auto-release workflow tags whatever version the manifest arrives with and
+# skips when that version already has a tag, so one push is one release however
+# many commits it carries.
+#
+# Choose a minor or major bump by editing "version" in manifest.json yourself;
+# this only ever touches the patch field, and only when it has to.
+
+set -euo pipefail
+
+staged=$(git diff --cached --name-only)
+[[ -n $staged ]] || exit 0
+
+# A commit that only edits the manifest is either a deliberate version choice or
+# this hook's own work. Either way, leave it alone.
+if [[ $(printf '%s\n' "$staged" | grep -vc '^manifest\.json$') -eq 0 ]]; then
+  exit 0
+fi
+
+# Nothing user-facing changed, so nothing to release.
+if ! printf '%s\n' "$staged" | grep -qvE '^(README\.md|CONTRIBUTING\.md|LICENSE|\.gitignore|docs/|assets/|\.github/|tests/|Makefile|\.githooks/)'; then
+  exit 0
+fi
+
+current=$(python3 -c 'import json;print(json.load(open("manifest.json"))["version"])')
+
+# If the manifest was already bumped by hand and has no tag yet, that is the
+# intended version for this release. Respect it rather than bumping past it.
+if ! git tag --list "v$current" | grep -q .; then
+  exit 0
+fi
+
+next=$(python3 - "$current" <<'PY'
+import sys
+major, minor, patch = sys.argv[1].split(".")
+print(f"{major}.{minor}.{int(patch) + 1}")
+PY
+)
+
+python3 - "$next" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path("manifest.json")
+m = json.loads(p.read_text())
+m["version"] = sys.argv[1]
+p.write_text(json.dumps(m, indent=2) + "\n")
+PY
+
+git add manifest.json
+echo "pre-commit: version $current -> $next (pushing this releases v$next)"
