@@ -1,3 +1,6 @@
+<img width="588" height="378" alt="image" src="https://github.com/user-attachments/assets/ee26e379-79d6-496c-872a-3cf4bac77bee" />
+
+
 # Tormarchy
 
 Route **all** system traffic through Tor from the Omarchy bar. One click to
