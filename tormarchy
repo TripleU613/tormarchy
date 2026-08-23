@@ -47,6 +47,13 @@ DNS_PORT=9053
 SOCKS_PORT=9050
 CONTROL_PORT=9051
 
+# The most a single control-port reply may occupy. Every caller captures the
+# whole reply in a shell variable, and the panel asks again every few seconds,
+# so an endpoint that answers without ever stopping would grow that process for
+# as long as the timeout allows. The ceiling is far above any real reply: the
+# largest is a full circuit-status listing, a few hundred bytes per circuit.
+CONTROL_REPLY_BYTE_LIMIT=262144
+
 # Tor's virtual range for .onion names resolved via AutomapHostsOnResolve.
 VIRT_NET="10.192.0.0/10"
 
@@ -131,16 +138,27 @@ runtime_dir() {
   printf '%s' "$dir"
 }
 
-# The first line of a cache entry, but only when it is a regular file this user
-# owns. A symlink, a directory, a device node, or a file dropped by another
-# account is ignored rather than read. The read is bounded so an entry someone
-# replaced with an enormous file cannot be pulled into memory.
+# The first line of a cache entry.
+#
+# Every guarantee rides on the flags of a single open rather than on a stat of
+# the name beforehand. Testing the name and then opening it are two steps, and
+# between them another process running as this same user -- the only account
+# that can reach inside a 0700 directory -- can swap the entry for a symlink or
+# a fifo, so the earlier type and owner tests said nothing about what was
+# actually opened. Ownership is not the boundary here anyway: within one uid it
+# is not a boundary at all.
+#
+# So: nofollow refuses a symlink inside open(2) itself, leaving no window to
+# swap; nonblock means a fifo left in its place returns instead of parking a
+# panel refresh on a writer that never comes; and count bounds what a replaced
+# entry can hand back. A directory opens but refuses to read, and dd reports
+# that as a failure.
 read_cache_line() {
-  local path=$1 line
-  [[ ! -L $path && -f $path && -O $path && -r $path ]] || return 1
-  IFS= read -r line < <(head -c "$CACHE_BYTE_LIMIT" -- "$path" 2>/dev/null)
-  [[ -n $line ]] || return 1
-  printf '%s' "$line"
+  local path=$1 raw
+  raw=$(dd if="$path" iflag=nofollow,nonblock bs="$CACHE_BYTE_LIMIT" count=1 \
+    status=none 2>/dev/null) || return 1
+  [[ -n $raw ]] || return 1
+  printf '%s' "${raw%%$'\n'*}"
 }
 
 # Replace a cache entry in one step. mktemp creates a fresh regular file in the
@@ -291,7 +309,13 @@ tor_control() {
   for cmd in "$@"; do printf '%s\r\n' "$cmd" >&3; done
   printf 'QUIT\r\n' >&3
 
-  timeout "${TOR_CONTROL_TIMEOUT:-5}" cat <&3
+  # head rather than cat, so the ceiling is applied as the socket is read and
+  # not after command substitution has already retained the whole reply. It
+  # returns as soon as the limit is reached, and the timeout remains the bound
+  # on an endpoint that stalls instead of flooding. A reply large enough to be
+  # truncated no longer parses, and every caller treats an unparseable reply as
+  # no answer.
+  timeout "${TOR_CONTROL_TIMEOUT:-5}" head -c "$CONTROL_REPLY_BYTE_LIMIT" <&3
   local status=$?
   exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
   return $status
