@@ -114,12 +114,15 @@ want "runtime state requires a private directory" tormarchy "runtime_dir()"
 want "the runtime directory must be owned and not a symlink" tormarchy '[[ -n $base && ! -L $base && -d $base && -O $base ]] || return 1'
 want "the runtime directory is created 0700" tormarchy 'mkdir -m 0700 -- "$dir"'
 
-# An entry is trusted only when it is a regular file this user owns: a planted
-# symlink, a directory, a fifo, or a file dropped by another account is ignored
-# rather than read, and the read is bounded so a replaced entry cannot be
-# pulled into memory whole.
-want "cache reads reject non-regular and misowned entries" tormarchy '[[ ! -L $path && -f $path && -O $path && -r $path ]] || return 1'
-want "cache reads are bounded" tormarchy 'head -c "$CACHE_BYTE_LIMIT"'
+# An entry is read through the flags of a single open, not through a stat of the
+# name first. Testing the name and then opening it are two steps, and a process
+# running as this same user -- the only account that can reach inside a 0700
+# directory -- can swap the entry for a symlink or a fifo in between, so the
+# earlier type and owner tests said nothing about what was actually opened.
+# Ownership is not the boundary within one uid anyway.
+reject "the cache read does not stat the name before opening it" tormarchy '[[ ! -L $path && -f $path'
+want "the cache read is one no-follow, nonblocking open" tormarchy "iflag=nofollow,nonblock"
+want "the cache read is bounded by that same open" tormarchy 'bs="$CACHE_BYTE_LIMIT" count=1'
 
 # Writing through the path itself is what made a planted symlink useful. A
 # fresh mktemp file plus a rename cannot follow a link, and leaves no
@@ -132,6 +135,19 @@ want "cache writes land by atomic rename" tormarchy 'mv -f -- "$tmp" "$path"'
 # root-owned truncate of any file on the system.
 reject "setup does not write its verify log to a fixed path" tormarchy "/tmp/tormarchy-verify.log"
 want "the verify log is created by mktemp" tormarchy 'verify_log=$(mktemp --'
+
+echo
+echo "Control port"
+
+# Every caller captures a control-port reply whole in a shell variable, and the
+# panel asks again every few seconds. Read with a bare cat, a faulty or
+# compromised local endpoint that answers without ever stopping grew that
+# process for as long as the timeout allowed -- 367 MB inside five seconds,
+# measured against a flooding endpoint. The ceiling has to be applied while the
+# socket is read, not after command substitution has already retained the reply.
+reject "the control-port reply is not read without a ceiling" tormarchy "cat <&3"
+want "the control-port reply has a byte ceiling" tormarchy 'head -c "$CONTROL_REPLY_BYTE_LIMIT" <&3'
+want "the ceiling is applied inside the timeout" tormarchy 'timeout "${TOR_CONTROL_TIMEOUT:-5}" head -c'
 
 echo
 echo "The panel talks to the dispatcher"
