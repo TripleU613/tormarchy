@@ -1,0 +1,115 @@
+name: Auto-merge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  triage:
+    name: Decide
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+
+      # Which files a pull request touches decides whether a human has to look
+      # at it. This plugin runs as root through a passwordless polkit grant,
+      # rewrites the firewall, and loads QML into a long-lived shell process, so
+      # "CI is green" is not the same as "this is safe to ship". CI checks syntax
+      # and rule ordering; it cannot check intent. One added line that exfiltrates
+      # something passes every check in this repository.
+      #
+      # So: prose and pictures merge themselves. Anything that executes waits for
+      # a human, and merges itself the moment one approves.
+      - name: Classify the change
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          files=$(gh pr diff "$PR" --name-only)
+          echo "changed files:"; printf '  %s\n' $files
+
+          # Deliberately an allowlist, not a blocklist. A new executable file
+          # type added later is then unsafe by default rather than safe by
+          # oversight.
+          risky=""
+          for f in $files; do
+            case "$f" in
+              README.md|CONTRIBUTING.md|LICENSE|.gitignore) ;;
+              docs/*|assets/*)                              ;;
+              *) risky="$risky $f" ;;
+            esac
+          done
+
+          if [[ -z $risky ]]; then
+            echo "verdict=safe" >> "$GITHUB_OUTPUT"
+            echo "Only docs and assets changed."
+          else
+            echo "verdict=review" >> "$GITHUB_OUTPUT"
+            echo "risky=$risky" >> "$GITHUB_OUTPUT"
+            echo "Executable or packaging files changed:$risky"
+          fi
+
+      # An approval from someone who can write to the repository is the human
+      # gate. GitHub reports that as APPROVED on the review event.
+      - name: Check for an approval
+        id: approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          state=$(gh pr view "$PR" --json reviewDecision --jq '.reviewDecision // ""')
+          echo "review decision: ${state:-none}"
+          [[ $state == APPROVED ]] && echo "approved=true" >> "$GITHUB_OUTPUT" \
+                                   || echo "approved=false" >> "$GITHUB_OUTPUT"
+
+      # Auto-merge is a request, not an immediate merge: branch protection
+      # requires the Checks job, so GitHub holds the pull request until CI is
+      # green and merges it then. If CI fails it simply never merges.
+      - name: Enable auto-merge
+        if: steps.classify.outputs.verdict == 'safe' || steps.approval.outputs.approved == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr merge "$PR" --squash --auto
+          if [[ "${{ steps.classify.outputs.verdict }}" == "safe" ]]; then
+            gh pr comment "$PR" --body \
+              "Docs or assets only, so this merges itself once CI is green. No review needed."
+          fi
+
+      - name: Ask for a human
+        if: steps.classify.outputs.verdict == 'review' && steps.approval.outputs.approved != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          RISKY: ${{ steps.classify.outputs.risky }}
+        run: |
+          gh pr edit "$PR" --add-label "needs-review" 2>/dev/null || true
+
+          # Say it once. Pushing more commits re-runs this job, and a repeated
+          # explanation in the thread is noise.
+          if gh pr view "$PR" --json comments --jq '.comments[].body' \
+             | grep -q "waiting on a review"; then
+            echo "already commented"
+            exit 0
+          fi
+
+          # Built with printf rather than a heredoc: a heredoc nested inside a
+          # YAML block scalar has to be indented to stay valid YAML, and its
+          # terminator then lands in the wrong column.
+          {
+            printf 'This touches files that run on the user machine, so it is waiting on a review rather than merging itself:\n\n'
+            printf '```\n%s\n```\n\n' "$RISKY"
+            printf '`tormarchy` runs as root through a passwordless polkit grant and rewrites the firewall, and the QML loads into a long-lived shell process. CI checks that the code parses and that the ruleset keeps its ordering guarantees. It cannot check what the code intends to do.\n\n'
+            printf 'Approve it and it merges and releases on its own.\n'
+          } > /tmp/review-comment.md
+
+          gh pr comment "$PR" --body-file /tmp/review-comment.md

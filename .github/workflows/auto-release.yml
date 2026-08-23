@@ -1,0 +1,59 @@
+name: Auto-release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Tag and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Is this version already out?
+        id: check
+        run: |
+          version=$(python3 -c 'import json;print(json.load(open("manifest.json"))["version"])')
+          echo "manifest version: $version"
+          if git tag --list "v$version" | grep -q .; then
+            echo "v$version is already released, nothing to do"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "v$version has no tag yet"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install tooling
+        if: steps.check.outputs.release == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck libxml2-utils nftables
+          # nft resolves `meta skuid "tor"` when it parses the ruleset, so the
+          # account has to exist for the ruleset to be checkable at all.
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin tor || true
+
+      # Nothing is published that has not passed. Same script CI and
+      # contributors run, so there is one definition of green.
+      - name: Run checks
+        if: steps.check.outputs.release == 'true'
+        run: sudo -E .github/scripts/check.sh
+
+      - name: Tag and publish
+        if: steps.check.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          git tag -a "v$VERSION" -m "v$VERSION"
+          git push origin "v$VERSION"
+          # Notes come from merged pull requests, so contributors get credited
+          # without anyone maintaining a changelog.
+          gh release create "v$VERSION" --title "v$VERSION" --generate-notes --verify-tag
