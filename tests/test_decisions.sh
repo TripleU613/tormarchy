@@ -101,6 +101,39 @@ want "uninstall removes the boot unit" tormarchy 'rm -f "$BOOT_UNIT"'
 want "uninstall drops the firewall first" tormarchy "Removing any firewall rules"
 
 echo
+echo "Runtime state"
+
+# The circuit cache lived at ${XDG_RUNTIME_DIR:-/tmp}/tormarchy-path.cache and
+# was read and then truncated through that path directly. In the /tmp fallback
+# the name is globally predictable, so a symlink planted there turned every
+# panel refresh into a write into another file the user could reach. Found in
+# marketplace security review at ed6795e.
+reject "no /tmp fallback for runtime state" tormarchy 'XDG_RUNTIME_DIR:-/tmp'
+reject "no globally predictable cache name" tormarchy "tormarchy-path.cache"
+want "runtime state requires a private directory" tormarchy "runtime_dir()"
+want "the runtime directory must be owned and not a symlink" tormarchy '[[ -n $base && ! -L $base && -d $base && -O $base ]] || return 1'
+want "the runtime directory is created 0700" tormarchy 'mkdir -m 0700 -- "$dir"'
+
+# An entry is trusted only when it is a regular file this user owns: a planted
+# symlink, a directory, a fifo, or a file dropped by another account is ignored
+# rather than read, and the read is bounded so a replaced entry cannot be
+# pulled into memory whole.
+want "cache reads reject non-regular and misowned entries" tormarchy '[[ ! -L $path && -f $path && -O $path && -r $path ]] || return 1'
+want "cache reads are bounded" tormarchy 'head -c "$CACHE_BYTE_LIMIT"'
+
+# Writing through the path itself is what made a planted symlink useful. A
+# fresh mktemp file plus a rename cannot follow a link, and leaves no
+# half-written line for a concurrent reader.
+want "cache writes go through a fresh temporary file" tormarchy 'tmp=$(mktemp -- "$path.XXXXXX"'
+want "cache writes land by atomic rename" tormarchy 'mv -f -- "$tmp" "$path"'
+
+# Same class, worse blast radius: tor --verify-config runs as root during setup
+# and its output went to a fixed /tmp name, so a symlink planted there was a
+# root-owned truncate of any file on the system.
+reject "setup does not write its verify log to a fixed path" tormarchy "/tmp/tormarchy-verify.log"
+want "the verify log is created by mktemp" tormarchy 'verify_log=$(mktemp --'
+
+echo
 echo "The panel talks to the dispatcher"
 
 # The fifteen separate executables are gone. Any leftover hyphenated call would

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "tripleu.tor",
   "name": "Tormarchy",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "TripleU613",
   "license": "MIT",
   "description": "Route all system traffic through Tor from the Omarchy bar, with a real kill switch, new circuits, and exit-country selection.",
