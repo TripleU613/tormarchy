@@ -1329,7 +1329,14 @@ cmd_doctor() {
   if ! command -v tor >/dev/null 2>&1; then
     fail "tor is not installed"
   elif ! tor_is_running; then
-    fail "tor.service is not running"
+    # Stopped while disconnected is the correct idle state, not a fault: setup
+    # deliberately leaves tor disabled at boot so a reboot always restores
+    # normal networking. Only complain when something is meant to be running.
+    if $connected; then
+      fail "rules are applied but tor.service is not running -- the network is blocked"
+    else
+      skip "tor is stopped, which is normal while disconnected"
+    fi
   else
     pass "tor.service is running"
     local pct cookie
