@@ -7,6 +7,8 @@
   through Tor. Click it again, it doesn't.
 </p>
 
+---
+
 Needs Omarchy 4.x.
 
 ```bash
