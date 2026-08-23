@@ -207,6 +207,14 @@ else
   note "xmllint not installed, skipping XML checks"
 fi
 
+# The marketplace listing shows this. Not fatal, but a listing with no picture
+# is a listing nobody clicks.
+if [[ -f preview.png ]]; then
+  pass "preview.png is present ($(du -h preview.png | cut -f1))"
+else
+  note "no preview.png -- the marketplace listing will have no image"
+fi
+
 # A double hyphen inside an XML comment does not merely break the comment, it
 # makes the document unparseable. polkitd then registers no actions and pkexec
 # silently falls back to its generic admin-auth action, so the only symptom is a

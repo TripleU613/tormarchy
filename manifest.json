@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "usher.tor",
   "name": "Tormarchy",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "author": "usher",
   "license": "MIT",
   "description": "Route all system traffic through Tor from the Omarchy bar, with a real kill switch, new circuits, and exit-country selection.",
