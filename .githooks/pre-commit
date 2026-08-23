@@ -33,9 +33,20 @@ fi
 
 current=$(python3 -c 'import json;print(json.load(open("manifest.json"))["version"])')
 
-# If the manifest was already bumped by hand and has no tag yet, that is the
-# intended version for this release. Respect it rather than bumping past it.
-if ! git tag --list "v$current" | grep -q .; then
+# Deliberately NOT consulting tags. An earlier version asked
+# `git tag --list "v$current"` to spot a hand-set version, but tags created by
+# the release workflow live on the remote, and a local clone that has not
+# fetched them looks identical to a version nobody has released. That silently
+# skipped a bump and the change shipped with no release.
+#
+# Instead: if this commit itself edits the version, that is a deliberate choice
+# and is respected. Otherwise the patch is bumped. No network, no stale state.
+staged_version=$current
+committed_version=$(git show HEAD:manifest.json 2>/dev/null \
+  | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])' 2>/dev/null || echo "")
+
+if [[ -n $committed_version && $staged_version != "$committed_version" ]]; then
+  echo "pre-commit: version set to $staged_version by hand, leaving it alone"
   exit 0
 fi
 
