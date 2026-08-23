@@ -110,3 +110,5 @@ Nothing survives a reboot, so restarting always gets your network back.
 ## License
 
 MIT
+
+Not affiliated with or endorsed by the Tor Project.
