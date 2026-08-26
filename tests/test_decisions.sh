@@ -160,8 +160,17 @@ want "live latency streams from pingd" Service.qml "exec tormarchy pingd"
 
 # Measuring only while the panel is open. A request to a fixed host at a fixed
 # interval forever is a recognisable traffic pattern.
-want "latency streaming is gated on the panel being open" Service.qml "root.watching && root.torRunning"
+want "latency streaming is gated on the panel being open" Service.qml "root.watching && root.circuitReady"
 want "the panel sets watching from opened" Panel.qml "tor.watching = opened"
+
+# ...and on the connection being on, not merely on the daemon running. Gating the
+# stream on raw torRunning left a live millisecond reading ticking under an OFF
+# switch, because the daemon outlives the disconnect click.
+want "latency stops when the toggle is off, not just when tor stops" Service.qml "torRunning && (active || effectiveMode === "
+
+# The toggle's busy state is action-only. Folding the routine status poll in made
+# the switch flash and refuse clicks on every refresh.
+want "busy tracks actions, not the status poll" Service.qml "readonly property bool busy: actionProcess.running"
 
 echo
 if (( failures == 0 )); then
