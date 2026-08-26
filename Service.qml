@@ -57,6 +57,19 @@ Item {
   property bool measuringSpeed: false
   property string speedError: ""
 
+  // The moment the circuit is no longer carrying traffic -- the toggle went off,
+  // or the daemon stopped -- the last reading becomes a claim about a path that
+  // no longer exists. Drop it so the gauge empties to "— ms" at once rather than
+  // freezing on a stale number beside an OFF switch.
+  onCircuitReadyChanged: {
+    if (!circuitReady) {
+      latencyMs = 0
+      latencyHistory = []
+      speedError = ""
+      measuringSpeed = false
+    }
+  }
+
   // Every measurement taken this session, capped to what the sparkline shows.
   property var latencyHistory: []
 
@@ -70,7 +83,25 @@ Item {
   readonly property string defaultMode: Model.isValidMode(setting("mode", "lan")) ? String(setting("mode", "lan")) : "lan"
   // The mode to show selected: the live one when we have it, else the setting.
   readonly property string effectiveMode: mode !== "" ? mode : defaultMode
-  readonly property bool busy: statusProcess.running || actionProcess.running
+
+  // True only while a connect/disconnect/mode action is actually in flight.
+  // Deliberately does NOT fold in the routine status poll: that fires every
+  // second or two and each call makes real control-port round trips, so folding
+  // it in here flashed the toggle's spinner and made it briefly refuse clicks on
+  // every refresh -- an intermittent "the switch didn't take" that had nothing
+  // to do with any action. `refreshing` already covers the poll for anything
+  // that genuinely wants to know a status read is happening.
+  readonly property bool busy: actionProcess.running
+
+  // The latency card belongs to the "on" experience. It measures over the SOCKS
+  // proxy, which answers whenever tor is up at all -- including the
+  // disconnected-but-still-running state, and the gap between a disconnect click
+  // and the daemon actually stopping. Gating the live stream on that raw
+  // torRunning is what left a millisecond reading ticking under an OFF switch.
+  // Gate it on the optimistic `active` state instead, so turning off stops the
+  // gauge the instant the switch flips. Browser-only has no firewall "connected"
+  // state but does have a live proxy, so it counts as on for as long as tor runs.
+  readonly property bool circuitReady: torRunning && (active || effectiveMode === "socks")
 
   property string _statusOutput: ""
   property string _statusError: ""
@@ -166,7 +197,9 @@ Item {
   }
 
   function measureSpeed() {
-    if (speedProcess.running || !torRunning) return
+    // Same gate as the live stream: an on-demand reading while the toggle is off
+    // would measure a proxy the user has already switched away from.
+    if (speedProcess.running || !circuitReady) return
     measuringSpeed = true
     speedError = ""
     _speedOutput = ""
@@ -244,7 +277,7 @@ Item {
   // there is no daemon to leak.
   Process {
     id: pingProcess
-    running: root.watching && root.torRunning
+    running: root.watching && root.circuitReady
     command: ["bash", "-c", "exec tormarchy pingd " + root.speedIntervalSec]
 
     stdout: SplitParser {
