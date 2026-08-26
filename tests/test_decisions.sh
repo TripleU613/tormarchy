@@ -165,8 +165,23 @@ want "the panel sets watching from opened" Panel.qml "tor.watching = opened"
 
 # ...and on the connection being on, not merely on the daemon running. Gating the
 # stream on raw torRunning left a live millisecond reading ticking under an OFF
-# switch, because the daemon outlives the disconnect click.
-want "latency stops when the toggle is off, not just when tor stops" Service.qml "torRunning && (active || effectiveMode === "
+# switch, because the daemon outlives the disconnect click. Requiring the
+# connection to be real and not just asked for keeps it from pointing a stream of
+# failing requests at a proxy that cannot carry them during a long bootstrap.
+want "latency stops when the toggle is off, not just when tor stops" Service.qml "readonly property bool circuitReady: torRunning && active"
+want "latency waits for a real connection, not an intended one" Service.qml '(effectiveMode === "socks" || connected)'
+
+# "On" is mode-dependent. Browser-only installs no rules, so measuring it by
+# `connected` left the switch stuck on OFF with tor plainly running, and made
+# clicking it connect again rather than disconnect -- the mode could not be
+# turned off from the panel at all.
+want "the on-state is mode-aware" Service.qml 'effectiveMode === "socks" ? torRunning : connected'
+want "the settle match uses the same definition" Service.qml "liveConnection === (_desired === 1)"
+
+# A status read is several control-port round trips and outlives a fast action,
+# so a reply issued before it repainted the panel with a live circuit under an
+# OFF switch.
+want "stale status reads are dropped" Service.qml "root._statusEpoch !== root._actionEpoch"
 
 # The toggle's busy state is action-only. Folding the routine status poll in made
 # the switch flash and refuse clicks on every refresh.

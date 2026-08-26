@@ -144,7 +144,7 @@ Panel {
     var order = ["header"]
     if (showExit) order.push("exit")
     order.push("speed")
-    if (tor.connected) order.push("newnym")
+    if (tor.canNewCircuit) order.push("newnym")
     order.push("mode")
     return order
   }
@@ -276,6 +276,7 @@ Panel {
     target: tor
     function onInstalledChanged() { root.ensureCursor() }
     function onConnectedChanged() { root.ensureCursor() }
+    function onCanNewCircuitChanged() { root.ensureCursor() }
     function onModeChanged() { root.ensureCursor() }
   }
 
@@ -605,7 +606,7 @@ Panel {
                 height: root.surfaceHeight
                 clip: true
 
-                readonly property bool available: tor.connected
+                readonly property bool available: tor.canNewCircuit
                 readonly property bool hot: circuitHover.containsMouse
                   || (root.cursorActive && root.focusSection === "newnym")
 
@@ -645,7 +646,11 @@ Panel {
               width: parent.width
               height: root.metricsHeight
               spacing: connectedBody.gap
-              visible: tor.connected && tor.path.length > 0
+              // circuitReady, not connected: browser-only has a real circuit with a
+              // real path and was hiding all three figures because it installs no
+              // rules, and in the routed modes this drops the strip the moment the
+              // switch goes off instead of leaving a circuit on screen under it.
+              visible: tor.circuitReady && tor.path.length > 0
               clip: true
 
               // Thirds that add up, rather than three hand-picked widths that
