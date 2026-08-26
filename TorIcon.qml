@@ -23,19 +23,40 @@ Item {
   property real iconSize: Style.font.icon
   property color color: Color.foreground
 
+  // Whole pixels, for the same reason TorWordmark rounds its blocks. Style.space()
+  // is theme-scaled, so the bar's Style.space(13) arrives as 15.99 rather than 16 --
+  // and a glyph whose own box is 15.99 wide gets centred onto a half pixel, which
+  // antialiases into a soft mark sitting visibly off to one side at bar size.
+  readonly property real pixelSize: Math.max(1, Math.round(iconSize))
+
   // The source artwork's canvas. Every coordinate below is in these units.
   readonly property real sourceSize: 512
 
-  width: iconSize
-  height: iconSize
-  implicitWidth: iconSize
-  implicitHeight: iconSize
+  // The mark's bounding box is a full disc, so it centres perfectly by geometry
+  // and still looks pushed to the left. That is because the ring bands are cut
+  // out of the right half only -- the mirrored half of the original artwork is
+  // deliberately not drawn here -- so the solid left half carries more of the
+  // ink. Measured against the shipped path, the filled area's centroid sits
+  // 19.2 of these units left of the canvas centre: 3.75% of the width, which is
+  // 0.6px of visible lean on the 16px bar glyph.
+  //
+  // So the artwork is nudged back by exactly that, which is what optical
+  // centring means for an asymmetric mark. Set to 0 to centre it by geometry.
+  property real opticalShift: sourceSize * 0.0375
+
+  width: pixelSize
+  height: pixelSize
+  implicitWidth: pixelSize
+  implicitHeight: pixelSize
 
   Item {
+    // Applied in source units and scaled with everything else, so the correction
+    // stays proportional at every size the mark is drawn at.
+    x: root.opticalShift * root.pixelSize / root.sourceSize
     width: root.sourceSize
     height: root.sourceSize
     transformOrigin: Item.TopLeft
-    scale: root.iconSize / root.sourceSize
+    scale: root.pixelSize / root.sourceSize
 
     Shape {
       anchors.fill: parent
