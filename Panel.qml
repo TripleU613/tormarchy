@@ -302,7 +302,11 @@ Panel {
     // colour, and the panel is one click away for anything more specific.
     iconComponent: Component {
       TorIcon {
-        anchors.centerIn: parent
+        // Rounded rather than anchors.centerIn: the button's width and the
+        // glyph's can differ in parity, and centring then lands the mark on a
+        // half pixel even once the glyph itself is a whole number of them.
+        x: Math.round((parent.width - width) / 2)
+        y: Math.round((parent.height - height) / 2)
         iconSize: Style.space(13)
         color: root.barIconColor
       }
