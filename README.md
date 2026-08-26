@@ -83,7 +83,9 @@ Left click opens it, right click toggles, middle click gets a new circuit.
 Inside: `j`/`k` to move, `t` toggle, `n` new circuit, `e` exit country,
 `s` measure latency, `esc` to close.
 
-The onion only lights up once traffic is actually going through Tor.
+The onion only lights up once traffic is actually going through Tor. In browser
+only the switch follows Tor itself, since that mode routes nothing system-wide --
+so it reads on while the onion stays dark.
 
 ## Commands
 

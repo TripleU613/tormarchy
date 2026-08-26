@@ -29,7 +29,15 @@ Item {
   // than waiting for a bootstrap that can take ten seconds. _desired is -1
   // while we just follow the real state, or 0/1 while a toggle catches up.
   property int _desired: -1
-  readonly property bool active: _desired === -1 ? connected : (_desired === 1)
+
+  // What "on" means depends on the mode. With a ruleset it is the rules being
+  // present. Browser-only installs none by design, so `connected` is false there
+  // forever -- which left the switch stuck on OFF with Tor plainly running, and
+  // made clicking it call connect again instead of disconnect, so browser-only
+  // could not be turned off from the panel at all. In that mode the honest
+  // answer to "is it on" is whether tor itself is up.
+  readonly property bool liveConnection: effectiveMode === "socks" ? torRunning : connected
+  readonly property bool active: _desired === -1 ? liveConnection : (_desired === 1)
   readonly property bool bootstrapping: torRunning && !connected && bootstrap < 100
   property bool refreshing: false
   property string actionStatus: ""
@@ -57,6 +65,9 @@ Item {
   property bool measuringSpeed: false
   property string speedError: ""
 
+  // Every measurement taken this session, capped to what the sparkline shows.
+  property var latencyHistory: []
+
   // The moment the circuit is no longer carrying traffic -- the toggle went off,
   // or the daemon stopped -- the last reading becomes a claim about a path that
   // no longer exists. Drop it so the gauge empties to "— ms" at once rather than
@@ -69,9 +80,6 @@ Item {
       measuringSpeed = false
     }
   }
-
-  // Every measurement taken this session, capped to what the sparkline shows.
-  property var latencyHistory: []
 
   // Countries Tor currently has usable exit relays in. Loaded on demand, not
   // polled: it costs a walk of the whole consensus, and it barely changes.
@@ -93,15 +101,35 @@ Item {
   // that genuinely wants to know a status read is happening.
   readonly property bool busy: actionProcess.running
 
-  // The latency card belongs to the "on" experience. It measures over the SOCKS
-  // proxy, which answers whenever tor is up at all -- including the
-  // disconnected-but-still-running state, and the gap between a disconnect click
-  // and the daemon actually stopping. Gating the live stream on that raw
-  // torRunning is what left a millisecond reading ticking under an OFF switch.
-  // Gate it on the optimistic `active` state instead, so turning off stops the
-  // gauge the instant the switch flips. Browser-only has no firewall "connected"
-  // state but does have a live proxy, so it counts as on for as long as tor runs.
-  readonly property bool circuitReady: torRunning && (active || effectiveMode === "socks")
+  // Whether there is a circuit worth measuring. Two things have to agree: the
+  // switch says on (`active`, so flipping it off stops the gauge that same
+  // instant rather than when the daemon finally exits), and the connection is
+  // really up rather than merely asked for. Gating on raw torRunning is what
+  // left a millisecond reading ticking under an OFF switch; leaving the second
+  // half out instead pointed a stream of failing requests at a proxy that cannot
+  // carry them yet, for the whole of a bootstrap that runs up to two minutes.
+  readonly property bool circuitReady: torRunning && active && !bootstrapping
+    && (effectiveMode === "socks" || connected)
+
+  // NEWNYM goes over the control port and needs no ruleset, so a new circuit is
+  // available in browser-only too -- it was greyed out there purely because it
+  // was gated on `connected`, which that mode never sets.
+  //
+  // Both of these carry !bootstrapping for the same reason: there is no circuit
+  // to measure or replace until one exists. In the routed modes `connected`
+  // already implies it, so this only changes browser-only, which reaches a
+  // working proxy well after the command that started it has returned.
+  readonly property bool canNewCircuit: torRunning && active && !bootstrapping
+
+  // A status read is several control-port round trips, so one is often still in
+  // flight when a connect or disconnect finishes. Applying it afterwards
+  // repainted the panel from before the action -- a live circuit, its full path
+  // and "All traffic through Tor" sitting under a switch that already read OFF,
+  // until the next poll happened to correct it. Every read carries the action
+  // epoch it started in; a reply from an earlier epoch describes a machine that
+  // no longer exists and is dropped.
+  property int _actionEpoch: 0
+  property int _statusEpoch: 0
 
   property string _statusOutput: ""
   property string _statusError: ""
@@ -127,6 +155,7 @@ Item {
     if (statusProcess.running) return
     _statusOutput = ""
     _statusError = ""
+    _statusEpoch = _actionEpoch
     refreshing = true
     // Via bash so a missing helper is a real exit 127 we can report as
     // "not installed"; a bare argv would just fail to spawn instead.
@@ -155,7 +184,11 @@ Item {
     bytesWritten = parsed.bytesWritten
     warnings = parsed.warnings
     // Reality caught up to the pending connect/disconnect — stop overriding.
-    if (_desired !== -1 && connected === (_desired === 1)) _desired = -1
+    // Compared against liveConnection, not connected: in browser-only the rules
+    // never appear, so a connect measured against `connected` could not ever
+    // match and the optimistic state was only ever dropped by the settle
+    // timeout, which reads as the switch flicking back on its own.
+    if (_desired !== -1 && liveConnection === (_desired === 1)) _desired = -1
     statusText = parsed.statusText !== "" ? parsed.statusText : Model.stateLabel(root)
     lastError = ""
   }
@@ -166,8 +199,9 @@ Item {
   // terminal just to ask for a password.
   function connect(requestedMode) {
     var target = Model.isValidMode(requestedMode) ? String(requestedMode) : defaultMode
-    // SOCKS mode touches no firewall rules, so there is nothing to "connect".
-    run(["tormarchy", "connect", target], target === "socks" ? -1 : 1, qsTr("Connecting…"))
+    // Every mode gets the optimistic state, browser-only included: it applies no
+    // rules, but it does start tor, which is what "on" means there.
+    run(["tormarchy", "connect", target], 1, qsTr("Connecting…"))
   }
 
   function disconnect() {
@@ -350,6 +384,10 @@ Item {
     stderr: StdioCollector { id: statusStderr; waitForEnd: true; onStreamFinished: root._statusError = text }
     onExited: function(exitCode) {
       root.refreshing = false
+      // Issued before the last action completed, so it describes the machine as
+      // it was beforehand. The settle poll that every action starts is already
+      // on its way with a current answer.
+      if (root._statusEpoch !== root._actionEpoch) return
       var stdout = String(statusStdout.text || root._statusOutput || "")
       var stderr = String(statusStderr.text || root._statusError || "")
       // A missing helper is the expected pre-setup state, not an error to
@@ -387,6 +425,8 @@ Item {
         root.lastError = ""
         actionStatusTimer.restart()
       }
+      // Everything read before this point is now stale.
+      root._actionEpoch += 1
       settleTimer.ticks = 0
       settleTimer.restart()
       delayedRefresh.restart()
