@@ -13,7 +13,7 @@ permissions:
 jobs:
   triage:
     name: Decide
-    runs-on: ubuntu-latest
+    runs-on: ${{ !contains(fromJSON('["pull_request","pull_request_review","pull_request_target","issue_comment","workflow_run"]'), github.event_name) && 'debiantripleu-ci' || 'ubuntu-latest' }}
     if: github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
