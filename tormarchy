@@ -58,7 +58,13 @@ CONTROL_REPLY_BYTE_LIMIT=262144
 VIRT_NET="10.192.0.0/10"
 
 NFT_TABLE="tormarchy"
+# Browser-only's lockdown lives in a table of its own. The main table is
+# replaced on every connect and mode change and deleted on disconnect, and none
+# of that may unlock a browser that is still running.
+NFT_BROWSER_TABLE="tormarchy_browser"
 STATE_DIR="/run/tormarchy"
+# Outside STATE_DIR, which disconnect deletes while another command may hold it.
+LOCK_FILE="/run/tormarchy.lock"
 MODE_FILE="$STATE_DIR/mode"
 ACTIVE_FILE="$STATE_DIR/active"
 IPV6_STATE_FILE="$STATE_DIR/ipv6-was"
@@ -91,11 +97,14 @@ VALID_MODES=(lan strict socks)
 # because captive portals and tethered connections live there.
 LAN_NETS_V4="10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10"
 
+# Tor's own cookie, wherever this tor build writes it.
+TOR_COOKIES=(/var/lib/tor/control_auth_cookie /run/tor/control_auth_cookie)
+
 # Where to look for a control cookie, best first. The published copy comes first
 # because it is the only one that works without a fresh login: group membership
 # reaches a process at login and never after, so in the session that installed
 # this the group-readable original is unreadable however correct its mode.
-COOKIE_CANDIDATES=("$USER_COOKIE" /var/lib/tor/control_auth_cookie /run/tor/control_auth_cookie)
+COOKIE_CANDIDATES=("$USER_COOKIE" "${TOR_COOKIES[@]}")
 
 # ------------------------------------------------------------------ helpers --
 
@@ -253,14 +262,25 @@ publish_cookie() {
   [[ $user != root ]] || return 1
   id -u "$user" >/dev/null 2>&1 || return 1
 
+  # Always from tor's own file, never from the published copy. This used to ask
+  # cookie_path, which prefers the copy -- so once one existed it was "found"
+  # and never refreshed. tor writes a new cookie every time it starts, so after
+  # any restart (bridges going on, an exit change falling back to a restart,
+  # the watchdog, a crash) the copy authenticated against nothing: the panel
+  # lost the control port, and connect itself read 0% for two minutes and gave
+  # up on a tor that was working fine.
+  #
   # tor writes the cookie while processing its config, which can land after
   # systemctl start has returned.
+  local candidate
+  source=""
   for (( attempt = 0; attempt < 50; attempt++ )); do
-    source=$(cookie_path) && break
+    for candidate in "${TOR_COOKIES[@]}"; do
+      [[ -r $candidate ]] && { source=$candidate; break 2; }
+    done
     sleep 0.1
   done
-  [[ -n ${source:-} && -r $source ]] || return 1
-  [[ $source != "$USER_COOKIE" ]] || return 0
+  [[ -n $source ]] || return 1
 
   install -d -m 0755 "$STATE_DIR" || return 1
   install -o "$user" -g "$user" -m 0600 "$source" "$USER_COOKIE" 2>/dev/null
@@ -291,34 +311,44 @@ tor_is_running() {
 
 # One control-port session, many GETINFOs. Uses bash's /dev/tcp rather than nc,
 # which is not guaranteed to be installed on Arch.
+#
+# Every readable cookie is tried in turn until one authenticates. The published
+# copy is first because it is the one that works without a fresh login, but it
+# can be older than tor's current cookie if tor restarted with nobody around to
+# republish it -- and then the original, readable once the group membership has
+# taken effect, still gets through instead of the control port going dark.
 tor_control() {
-  local cookie_file cookie
-  cookie_file=$(cookie_path) || return 1
-  cookie=$(od -An -tx1 -v "$cookie_file" 2>/dev/null | tr -d ' \n') || return 1
-  [[ -n $cookie ]] || return 1
+  local candidate cookie reply cmd status
+  for candidate in "${COOKIE_CANDIDATES[@]}"; do
+    [[ -r $candidate ]] || continue
+    cookie=$(od -An -tx1 -v "$candidate" 2>/dev/null | tr -d ' \n')
+    [[ -n $cookie ]] || continue
 
-  exec 3<>"/dev/tcp/127.0.0.1/$CONTROL_PORT" 2>/dev/null || return 1
+    exec 3<>"/dev/tcp/127.0.0.1/$CONTROL_PORT" 2>/dev/null || return 1
 
-  local reply cmd
-  printf 'AUTHENTICATE %s\r\n' "$cookie" >&3
-  if ! IFS= read -r -t 3 reply <&3 || [[ $reply != 250* ]]; then
+    printf 'AUTHENTICATE %s\r\n' "$cookie" >&3
+    if ! IFS= read -r -t 3 reply <&3 || [[ $reply != 250* ]]; then
+      # tor closes the session after a failed AUTHENTICATE, so the next
+      # cookie gets a connection of its own.
+      exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
+      continue
+    fi
+
+    for cmd in "$@"; do printf '%s\r\n' "$cmd" >&3; done
+    printf 'QUIT\r\n' >&3
+
+    # head rather than cat, so the ceiling is applied as the socket is read and
+    # not after command substitution has already retained the whole reply. It
+    # returns as soon as the limit is reached, and the timeout remains the bound
+    # on an endpoint that stalls instead of flooding. A reply large enough to be
+    # truncated no longer parses, and every caller treats an unparseable reply
+    # as no answer.
+    timeout "${TOR_CONTROL_TIMEOUT:-5}" head -c "$CONTROL_REPLY_BYTE_LIMIT" <&3
+    status=$?
     exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
-    return 1
-  fi
-
-  for cmd in "$@"; do printf '%s\r\n' "$cmd" >&3; done
-  printf 'QUIT\r\n' >&3
-
-  # head rather than cat, so the ceiling is applied as the socket is read and
-  # not after command substitution has already retained the whole reply. It
-  # returns as soon as the limit is reached, and the timeout remains the bound
-  # on an endpoint that stalls instead of flooding. A reply large enough to be
-  # truncated no longer parses, and every caller treats an unparseable reply as
-  # no answer.
-  timeout "${TOR_CONTROL_TIMEOUT:-5}" head -c "$CONTROL_REPLY_BYTE_LIMIT" <&3
-  local status=$?
-  exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
-  return $status
+    return $status
+  done
+  return 1
 }
 
 # Bootstrap percentage and the session traffic counters, in one session: these
@@ -361,7 +391,7 @@ circuit_path() {
   # naive "last GENERAL circuit" picks up a single-hop tunnel to a directory
   # cache and presents it as where your traffic goes. That is how this reported
   # a one-country path for a three-hop circuit.
-  local newest_ts=0 candidate_created candidate_ts
+  local newest="" candidate candidate_created
   while IFS= read -r candidate; do
     [[ $candidate == *" BUILT "* ]] || continue
     [[ $candidate == *"PURPOSE=GENERAL"* ]] || continue
@@ -370,13 +400,14 @@ circuit_path() {
 
     # Newest by timestamp rather than by position: circuit-status makes no
     # promise about ordering, and the newest general circuit is the one
-    # carrying new streams.
-    candidate_created=$(sed -n 's/.*TIME_CREATED=\([^ ]*\).*/\1/p' <<<"$candidate")
-    candidate_ts=0
-    [[ -n $candidate_created ]] &&
-      candidate_ts=$(date -u -d "${candidate_created%%.*}Z" +%s 2>/dev/null || echo 0)
-    if (( candidate_ts >= newest_ts )); then
-      newest_ts=$candidate_ts
+    # carrying new streams. TIME_CREATED is fixed-width ISO 8601 in UTC, so it
+    # orders correctly as a string. Comparing it that way saves a date(1) fork
+    # per circuit on every poll, and the panel polls every second while
+    # connecting.
+    candidate_created=""
+    [[ $candidate =~ TIME_CREATED=([^ ]+) ]] && candidate_created=${BASH_REMATCH[1]}
+    if [[ -z $line || ! $candidate_created < $newest ]]; then
+      newest=$candidate_created
       line=$candidate
     fi
   done <<<"$circuits"
@@ -602,33 +633,66 @@ flush_rules() {
 # which means a crash while connected leaves IPv6 dead after the next reboot
 # with nothing explaining why. Here a reboot always restores it.
 #
-# lo is left alone: disabling loopback v6 breaks local services binding ::1 for
-# no privacy gain, since loopback never leaves the machine.
+# lo is put back straight after: writing `all` switches off every interface,
+# loopback included, and loopback v6 going down broke anything local bound to
+# ::1 -- a dev server, an SSH tunnel, a database -- for no privacy gain, since
+# loopback never leaves the machine.
+IPV6_CONF=/proc/sys/net/ipv6/conf
+
 ipv6_disable() {
   (( EUID == 0 )) || return 1
-  [[ -w /proc/sys/net/ipv6/conf/all/disable_ipv6 ]] || return 0
+  [[ -w $IPV6_CONF/all/disable_ipv6 ]] || return 0
 
-  local previous knob
-  previous=$(<"/proc/sys/net/ipv6/conf/all/disable_ipv6") || previous=0
   install -d -m 0755 "$STATE_DIR"
-  printf '%s\n' "$previous" >"$IPV6_STATE_FILE"
 
-  for knob in all default; do
-    printf '1' >"/proc/sys/net/ipv6/conf/$knob/disable_ipv6" 2>/dev/null || true
-  done
+  # Saved once per connection, never overwritten. A second call -- switching
+  # between the routed modes, or connecting while already connected -- used to
+  # record the value this function had itself just written, so disconnecting
+  # "restored" IPv6 to off and it stayed dead until the next reboot.
+  #
+  # Every interface's own value, not only all and default. Writing `all`
+  # overwrites each of them, so putting back `all` alone also flattened any
+  # interface the user had switched off deliberately.
+  if [[ ! -e $IPV6_STATE_FILE ]]; then
+    local knob iface value
+    for knob in "$IPV6_CONF"/*/disable_ipv6; do
+      iface=${knob%/disable_ipv6}; iface=${iface##*/}
+      value=$(<"$knob") 2>/dev/null || continue
+      printf '%s %s\n' "$iface" "$value"
+    done >"$IPV6_STATE_FILE"
+  fi
+
+  printf '1' >"$IPV6_CONF/all/disable_ipv6" 2>/dev/null || true
+  printf '1' >"$IPV6_CONF/default/disable_ipv6" 2>/dev/null || true
+  printf '0' >"$IPV6_CONF/lo/disable_ipv6" 2>/dev/null || true
 }
 
 ipv6_restore() {
   (( EUID == 0 )) || return 1
 
-  # No state file means we never disabled it, and 0 is the safe assumption:
-  # leaving IPv6 off is the failure that looks like a broken machine days later.
-  local previous=0 knob
-  [[ -r $IPV6_STATE_FILE ]] && previous=$(<"$IPV6_STATE_FILE")
-  [[ $previous =~ ^[01]$ ]] || previous=0
+  # No state file means this never switched IPv6 off, so there is nothing of
+  # ours to undo. Writing zeros regardless, as this used to on every disconnect,
+  # panic and switch to browser-only, turned IPv6 back on for anyone who keeps
+  # it off on purpose -- a setting common among exactly the people who use Tor.
+  [[ -r $IPV6_STATE_FILE ]] || return 0
 
-  for knob in all default; do
-    printf '%s' "$previous" >"/proc/sys/net/ipv6/conf/$knob/disable_ipv6" 2>/dev/null || true
+  local -A saved=()
+  local iface value
+  while read -r iface value; do
+    # An older state file held one bare value for all and default.
+    [[ -z $value && $iface =~ ^[01]$ ]] && { saved[all]=$iface; saved[default]=$iface; continue; }
+    [[ $iface =~ ^[A-Za-z0-9_.:@-]+$ && $value =~ ^[01]$ ]] && saved[$iface]=$value
+  done <"$IPV6_STATE_FILE"
+
+  # all first, because writing it resets every interface; then each interface
+  # back to what it was. One that appeared while connected takes default's.
+  printf '%s' "${saved[all]:-0}" >"$IPV6_CONF/all/disable_ipv6" 2>/dev/null || true
+  printf '%s' "${saved[default]:-0}" >"$IPV6_CONF/default/disable_ipv6" 2>/dev/null || true
+  local knob
+  for knob in "$IPV6_CONF"/*/disable_ipv6; do
+    iface=${knob%/disable_ipv6}; iface=${iface##*/}
+    [[ $iface == all || $iface == default ]] && continue
+    printf '%s' "${saved[$iface]:-${saved[default]:-0}}" >"$knob" 2>/dev/null || true
   done
   rm -f "$IPV6_STATE_FILE"
 }
@@ -636,14 +700,41 @@ ipv6_restore() {
 # The boot receiver reads this marker to decide whether to reconnect. Only
 # touched while the receiver is enabled: without it, connecting leaves no trace
 # that outlives the session, which is the default and the safer one.
+#
+# It holds the mode. The mode file lives in /run and is gone by the next boot,
+# so an empty marker made the boot receiver connect in the default, lan --
+# quietly handing someone who chose Maximum a ruleset that lets the local
+# network through, every time they rebooted.
 remember_connected() {
+  local mode="${1:-}"
   [[ -f $BOOT_UNIT ]] || return 0
+  is_valid_mode "$mode" && [[ $mode != socks ]] || return 0
   install -d -m 0755 "$PERSIST_DIR" 2>/dev/null || return 0
-  : >"$RECONNECT_MARKER" 2>/dev/null || true
+  printf '%s\n' "$mode" >"$RECONNECT_MARKER" 2>/dev/null || true
+  chmod 0644 "$RECONNECT_MARKER" 2>/dev/null || true
+}
+
+# The mode the boot receiver should come back in, or nothing.
+remembered_mode() {
+  local mode=""
+  [[ -r $RECONNECT_MARKER ]] && mode=$(head -c 16 -- "$RECONNECT_MARKER" 2>/dev/null)
+  mode=${mode%%$'\n'*}
+  is_valid_mode "$mode" && [[ $mode != socks ]] && printf '%s' "$mode"
 }
 
 forget_connected() {
   rm -f "$RECONNECT_MARKER" 2>/dev/null || true
+}
+
+# Serialises the commands that change routing. Held for the moment of change
+# only, never across a bootstrap wait, so a disconnect can always get in to
+# cancel a connect that is still waiting for tor -- and one that arrives while
+# a connect is applying its rules waits for it to finish and then takes them
+# down, rather than racing it and leaving rules on with tor stopped.
+take_lock() {
+  (( EUID == 0 )) || return 0
+  { exec 9>"$LOCK_FILE"; } 2>/dev/null || return 0
+  flock -w 30 9 2>/dev/null || die "another tormarchy command is still changing the network; try again"
 }
 
 write_state() {
@@ -680,8 +771,13 @@ cmd_status() {
 
   local -a warnings=()
 
+  # Whether the control port answered at all. Without it the bootstrap figure
+  # is a placeholder 0, not a measurement, and reporting "bootstrapping at 0%"
+  # from it pinned the panel there for good with tor working perfectly well.
+  local control_port=false
   if $tor_running; then
     if vitals=$(tor_vitals); then
+      control_port=true
       IFS=$'\t' read -r bootstrap bytes_read bytes_written <<<"$vitals"
     fi
     if [[ ${bootstrap:-0} -ge 100 ]] && info=$(circuit_path); then
@@ -699,20 +795,26 @@ cmd_status() {
   # Traffic is not leaking, it is going nowhere -- but the user needs to know
   # why the machine went quiet.
   $connected && ! $tor_running \
-    && warnings+=("Rules are applied but tor is not running. Network is intentionally blocked; disconnect to restore it.")
-  $connected && [[ $mode != socks ]] && (( bootstrap < 100 )) \
+    && warnings+=("Tor has stopped, so the kill switch is holding the network shut. Turn Tormarchy off to get it back.")
+  $connected && $tor_running && $control_port && [[ $mode != socks ]] && (( bootstrap < 100 )) \
     && warnings+=("Tor is still bootstrapping at ${bootstrap}%.")
 
   local status_text
   if ! $installed; then
     status_text="Tor helpers are not installed"
+  elif $connected && ! $tor_running; then
+    # Before any "through Tor" wording: with tor gone nothing is going through
+    # it, and the bar's tooltip reads this line.
+    status_text="Kill switch holding: tor is not running, so the network is blocked"
+  elif $connected && $control_port && (( bootstrap < 100 )); then
+    status_text="Reconnecting to Tor at ${bootstrap}%; traffic waits until it is back"
   elif [[ $mode == socks ]] && $tor_running; then
     status_text="Browser-only: SOCKS proxy on 127.0.0.1:$SOCKS_PORT"
   elif $connected && [[ -n $exit_cc ]]; then
     status_text="All traffic through Tor via ${exit_cc^^}"
   elif $connected; then
     status_text="All traffic through Tor"
-  elif $tor_running && (( bootstrap < 100 )); then
+  elif $tor_running && $control_port && (( bootstrap < 100 )); then
     status_text="Bootstrapping at ${bootstrap}%"
   elif $tor_running; then
     status_text="Tor is running but traffic is not routed through it"
@@ -746,6 +848,7 @@ cmd_status() {
   "torRunning": $tor_running,
   "connected": $connected,
   "bootstrap": ${bootstrap:-0},
+  "controlPort": $control_port,
   "mode": "$(json_escape "$mode")",
   "exitIp": "$(json_escape "$exit_ip")",
   "exitCountry": "$(json_escape "$exit_cc")",
@@ -764,11 +867,22 @@ wait_bootstrap() {
   local seconds="$1" deadline pct=0
   deadline=$(( $(date +%s) + seconds ))
   while (( $(date +%s) < deadline )); do
+    # tor going away mid-wait is a disconnect cancelling this connect, not a
+    # slow network. Stop now rather than sit out the rest of two minutes.
+    tor_is_running || break
     pct=$(bootstrap_progress) || pct=0
     (( pct >= 100 )) && break
     sleep 1
   done
   printf '%s' "$pct"
+}
+
+# A disconnect that ran while connect was waiting stops tor. Nothing more to do
+# then, and certainly no bridges to start it back up again.
+cancelled_unless_running() {
+  tor_is_running && return 0
+  echo "Cancelled: tor was stopped before it finished connecting. No rules applied." >&2
+  exit 1
 }
 
 cmd_connect() {
@@ -777,6 +891,7 @@ cmd_connect() {
 
   local mode="${1:-}"
   [[ -z $mode ]] && mode=$(current_mode)
+  [[ -z $mode ]] && mode=$(remembered_mode)
   [[ -z $mode ]] && mode=lan
   is_valid_mode "$mode" || die "unknown mode '$mode' (expected: ${VALID_MODES[*]})"
 
@@ -815,6 +930,7 @@ cmd_connect() {
   publish_cookie || echo "note: could not publish a readable control cookie; live stats may be empty" >&2
 
   if [[ $mode == socks ]]; then
+    take_lock
     flush_rules
     ipv6_restore
     write_state socks no
@@ -851,6 +967,7 @@ NOTE
   echo "Waiting for Tor to bootstrap..."
   local pct
   pct=$(wait_bootstrap 120)
+  cancelled_unless_running
 
   # A stall looks the same whether the network is slow or blocking Tor outright,
   # and a bridge answers both. So try rather than making the user diagnose
@@ -858,13 +975,16 @@ NOTE
   if (( pct < 100 )) && [[ -f $BRIDGE_STASH && ! -f $TORRC_BRIDGES ]]; then
     echo "Stalled at ${pct}%. This network may be blocking Tor; retrying through bridges..."
     if bridge_activate "$BRIDGE_STASH" >/dev/null 2>&1; then
+      bridge_reload
       pct=$(wait_bootstrap 120)
+      cancelled_unless_running
       if (( pct >= 100 )); then
         echo "Bridges worked. Leaving them on for this network."
       else
         # Put it back as we found it, so the next attempt on a normal network is
         # not silently handicapped by bridges turned on here.
         rm -f "$TORRC_BRIDGES"; systemctl restart tor.service 2>/dev/null || true
+        publish_cookie || true
         echo "Bridges did not help either; turned them back off." >&2
       fi
     fi
@@ -878,6 +998,11 @@ NOTE
     die "tor stalled at ${pct}% bootstrap. $hint"
   fi
 
+  take_lock
+  # Checked again under the lock: a disconnect that got in between the wait
+  # and here has stopped tor, and rules applied now would shut the network
+  # with nothing behind them.
+  cancelled_unless_running
   apply_rules "$mode" || die "could not apply the nftables ruleset. Networking is unchanged."
 
   # After the rules, not before. If the ruleset fails to apply we leave the
@@ -885,12 +1010,13 @@ NOTE
   ipv6_disable || echo "note: could not turn off the IPv6 stack; the ruleset still drops IPv6" >&2
 
   write_state "$mode" yes
-  remember_connected
+  remember_connected "$mode"
   echo "Connected. All traffic now routes through Tor ($mode mode)."
 }
 
 cmd_disconnect() {
   require_root
+  take_lock
   # Rules first, then the daemon. The other order leaves a window where traffic
   # is still redirected to a Tor that is no longer listening -- which looks like
   # a dead network, but fails closed rather than leaking.
@@ -905,6 +1031,7 @@ cmd_disconnect() {
 
 cmd_panic() {
   require_root
+  # Deliberately no lock. The escape hatch must never wait behind anything.
   flush_rules
   ipv6_restore
   rm -rf "$STATE_DIR"
@@ -914,28 +1041,48 @@ cmd_panic() {
   echo "Removed all Tormarchy rules. Networking is back to normal."
 }
 
+# Changing mode never changes whether Tormarchy is on. What "on" means differs
+# by mode -- rules in place for lan and strict, tor running for browser-only --
+# so a switch that is on stays on in the new mode and one that is off stays off.
 cmd_mode() {
   local mode="${1:-}"
   is_valid_mode "$mode" || die "unknown mode '$mode' (expected: ${VALID_MODES[*]})"
   require_root
 
-  local was_active=false
-  rules_present && was_active=true
+  local was_routed=false browser_on=false
+  rules_present && was_routed=true
+  [[ $(current_mode) == socks ]] && tor_is_running && browser_on=true
 
   if [[ $mode == socks ]]; then
+    take_lock
     flush_rules
     ipv6_restore
     write_state socks no
-    echo "Switched to browser-only mode. System-wide routing is off."
+    # Boot reconnect is for the routed modes; browser-only is never resumed.
+    forget_connected
+    if $was_routed || $browser_on; then
+      echo "Switched to browser-only mode. System-wide routing is off; Tor is still running."
+    else
+      echo "Mode set to browser-only. Connect to start Tor."
+    fi
     return 0
   fi
 
-  if $was_active; then
+  if $was_routed; then
+    take_lock
     apply_rules "$mode" || die "could not apply the $mode ruleset; previous rules left in place"
     ipv6_disable || true
     write_state "$mode" yes
+    remember_connected "$mode"
     echo "Switched to $mode mode."
+  elif $browser_on; then
+    # Browser-only was on, so this stays on: in the new mode that means its
+    # rules, which go on through connect so they still wait for a full
+    # bootstrap. This used to only record the mode, which turned Tormarchy off
+    # from the user's point of view while tor kept running underneath.
+    cmd_connect "$mode"
   else
+    take_lock
     write_state "$mode" no
     echo "Mode set to $mode. Connect to apply it."
   fi
@@ -1006,6 +1153,11 @@ CONF
     systemctl reload tor.service 2>/dev/null || systemctl restart tor.service \
       || die "wrote the config but could not reload tor"
     publish_cookie || true
+    # A reload changes which exits new circuits may use, but the circuit
+    # already carrying traffic keeps its old exit until it ages out -- up to
+    # ten minutes of the panel saying one country and the traffic leaving from
+    # another. NEWNYM moves new streams onto a circuit built under the new rule.
+    tor_control 'SIGNAL NEWNYM' >/dev/null 2>&1 || true
   fi
 
   if [[ $target == auto ]]; then
@@ -1403,43 +1555,116 @@ cmd_browser() {
     [[ -n $chosen ]] || die "no supported browser found; install one or name it explicitly"
   fi
 
-  local profile="${XDG_DATA_HOME:-$HOME/.local/share}/tormarchy/firefox"
+  # Each family gets an instance of its own, never the one already open. A
+  # running browser handed a new window by command line opens it in the
+  # existing process, which is neither proxied nor locked down: Chromium and
+  # qutebrowser both do that, and with no separate profile the "Tor" window
+  # was an ordinary one, with nothing on screen to say so.
+  local data="${XDG_DATA_HOME:-$HOME/.local/share}/tormarchy"
+  local name=${chosen##*/}
   local -a cmd=()
-  case "$(family_of "$chosen")" in
+  case "$(family_of "$name")" in
   firefox)
-    ensure_firefox_profile "$profile"
-    cmd=("$chosen" --profile "$profile" --new-instance) ;;
+    ensure_firefox_profile "$data/firefox"
+    cmd=("$chosen" --profile "$data/firefox" --new-instance) ;;
   chromium)
+    mkdir -p "$data/chromium-$name" || die "could not create $data/chromium-$name"
     # host-resolver-rules is the documented way to stop Chromium resolving names
     # itself; without it the proxy carries the traffic while DNS leaves in clear.
-    cmd=("$chosen" "--proxy-server=socks5://127.0.0.1:$SOCKS_PORT"
+    cmd=("$chosen" "--user-data-dir=$data/chromium-$name"
+      "--proxy-server=socks5://127.0.0.1:$SOCKS_PORT"
       "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"
       "--proxy-bypass-list=<-loopback>") ;;
   qutebrowser)
-    cmd=("$chosen" -s content.proxy "socks://127.0.0.1:$SOCKS_PORT") ;;
+    mkdir -p "$data/qutebrowser" || die "could not create $data/qutebrowser"
+    cmd=("$chosen" --basedir "$data/qutebrowser" -s content.proxy "socks://127.0.0.1:$SOCKS_PORT") ;;
   *)
-    # Rely on the proxy environment below. The address filter is what makes that
-    # safe rather than hopeful: a browser that ignores the variables cannot
-    # reach the network at all, so it fails visibly instead of leaking quietly.
+    # These take only the proxy environment below, and have no flag known to
+    # force a separate instance -- so if one is already open, the new window
+    # would land in it, outside the lockdown. Refuse rather than guess.
+    if pgrep -u "$(id -u)" -x "${name:0:15}" >/dev/null 2>&1; then
+      die "$name is already running. Close it first: a new window would open in that unproxied instance instead of a locked-down one."
+    fi
     cmd=("$chosen") ;;
   esac
 
-  echo "Launching $chosen with only Tor reachable..."
+  local tag=${name//[^A-Za-z0-9_.-]/-}
+  echo "Launching $name with only Tor reachable..."
 
-  # IPAddressDeny/Allow are applied by systemd as a BPF filter on the process's
-  # cgroup, so the browser cannot open a socket to any address but loopback --
-  # whatever it, an extension, or WebRTC tries. Setting a proxy preference is a
-  # request; this is a rule.
-  exec systemd-run --user --scope --collect \
-    --unit="tormarchy-browser-$chosen-$$" \
-    --property=IPAddressDeny=any \
-    --property=IPAddressAllow=localhost \
+  # The scope is only the container. The lock itself is an nftables rule
+  # matching this scope's cgroup, which browser-exec asks root to add from
+  # inside it before it becomes the browser.
+  #
+  # This used to be IPAddressDeny=any on the scope. systemd implements that as
+  # a BPF program on the cgroup, and a user manager has no privilege to load
+  # one: it logs "configures an IP firewall, but not running as root" and
+  # carries on without it. So the address filter never existed, and a browser
+  # that ignored its proxy -- WebRTC, an extension, a browser reading none of
+  # the variables below -- went straight out of the NIC from the real address.
+  exec systemd-run --user --scope --collect --quiet \
+    --unit="tormarchy-browser-$tag-$$" \
     --setenv=ALL_PROXY="socks5h://127.0.0.1:$SOCKS_PORT" \
     --setenv=all_proxy="socks5h://127.0.0.1:$SOCKS_PORT" \
     --setenv=http_proxy="socks5h://127.0.0.1:$SOCKS_PORT" \
     --setenv=https_proxy="socks5h://127.0.0.1:$SOCKS_PORT" \
     --setenv=no_proxy="127.0.0.1,::1,localhost" \
-    -- "${cmd[@]}" "$@"
+    -- "$SELF" browser-exec -- "${cmd[@]}" "$@"
+}
+
+# Inside the scope systemd-run just made: lock it, then become the browser. If
+# the lock cannot be put on, the browser is never started -- a Tor browser that
+# quietly is not one is the failure this exists to prevent.
+cmd_browser_exec() {
+  [[ ${1:-} == -- ]] && shift
+  (( $# > 0 )) || die "browser-exec: nothing to launch"
+  "$SELF" browser-lock \
+    || die "could not lock the browser to Tor, so it was not started. Nothing was launched."
+  exec "$@"
+}
+
+# Root. Confines the calling browser scope to loopback.
+#
+# The scope is read from the caller's own process rather than taken as an
+# argument, and has to be one of the invoking user's tormarchy-browser scopes,
+# so this can only ever restrict the browser that asked. Rules accumulate one
+# per launch and are dropped when the scope's cgroup goes away with it -- the
+# id they match is never reused -- or at reboot.
+#
+# Loopback is all it may reach, and port 53 not even there: the system's stub
+# resolver lives on loopback and forwards whatever it is asked to the real DNS
+# servers, so a browser resolving names itself would otherwise leak every
+# lookup through it. Anything sent anywhere else, IPv6 included, is dropped.
+cmd_browser_lock() {
+  require_root
+  command -v nft >/dev/null 2>&1 || die "nft is not installed"
+
+  local user uid cgroup
+  user=$(invoking_user) || die "could not tell which user is launching the browser"
+  uid=$(id -u "$user" 2>/dev/null) || die "unknown user $user"
+
+  cgroup=$(awk -F: '$1 == "0" && $2 == "" { print $3; exit }' "/proc/$PPID/cgroup" 2>/dev/null)
+  cgroup=${cgroup#/}
+  [[ -n $cgroup ]] || die "browser lockdown needs the unified cgroup hierarchy (cgroup v2)"
+  [[ $cgroup =~ ^user\.slice/user-$uid\.slice/user@$uid\.service/([a-z-]+\.slice/)?tormarchy-browser-[A-Za-z0-9_.-]+\.scope$ ]] \
+    || die "refusing to lock $cgroup: not a tormarchy browser scope belonging to $user"
+
+  local -a parts
+  IFS=/ read -ra parts <<<"$cgroup"
+
+  nft -f - <<RULES || die "nft rejected the browser lockdown (it needs nftables socket cgroupv2 matching, kernel 5.13+)"
+table inet $NFT_BROWSER_TABLE {
+  chain output {
+    type filter hook output priority filter; policy accept;
+  }
+  chain lockdown {
+  }
+}
+flush chain inet $NFT_BROWSER_TABLE lockdown
+add rule inet $NFT_BROWSER_TABLE lockdown meta l4proto { tcp, udp } th dport 53 drop
+add rule inet $NFT_BROWSER_TABLE lockdown oifname "lo" accept
+add rule inet $NFT_BROWSER_TABLE lockdown counter drop
+add rule inet $NFT_BROWSER_TABLE output socket cgroupv2 level ${#parts[@]} "$cgroup" jump lockdown
+RULES
 }
 
 # ---- diagnostics ----
@@ -1565,9 +1790,11 @@ cmd_boot() {
       local enabled
       enabled=$(systemctl is-enabled tormarchy-boot.service 2>/dev/null || echo unknown)
       echo "Boot reconnect: installed ($enabled)"
-      [[ -f $RECONNECT_MARKER ]] \
-        && echo "  Tor was on when last connected, so it will reconnect at boot" \
-        || echo "  not currently armed -- connect once and it will be"
+      if [[ -f $RECONNECT_MARKER ]]; then
+        echo "  Tor was on when last connected, so it will reconnect at boot ($(remembered_mode || echo lan) mode)"
+      else
+        echo "  not currently armed -- connect once and it will be"
+      fi
     else
       echo "Boot reconnect: off"
       echo "  enable with: sudo tormarchy boot enable"
@@ -1587,7 +1814,7 @@ cmd_boot() {
 
     # Arm it now if Tor is already on, so enabling mid-session behaves the way
     # anyone would expect rather than waiting for the next reconnect.
-    rules_present && remember_connected
+    rules_present && remember_connected "$(current_mode)"
 
     cat <<DONE
 Boot reconnect is on.
@@ -1637,7 +1864,10 @@ cmd_setup() {
   if command -v tor >/dev/null 2>&1; then
     echo "  already installed"
   else
-    pacman -S --needed --noconfirm tor || die "could not install tor"
+    # No -y. Refreshing the database without upgrading is the partial upgrade
+    # Arch warns against, and Omarchy's own package helper does the same.
+    pacman -S --needed --noconfirm tor \
+      || die "could not install tor. If pacman reported 404s, the package database is out of date: run 'omarchy update', then setup again."
   fi
 
   step "Installing tormarchy into $BIN_DIR"
@@ -1791,8 +2021,14 @@ cmd_uninstall() {
   else
     echo "  none were loaded"
   fi
+  # Browser-only's lockdown too. Only ever restricts a browser, so it is never
+  # what cut the network, but uninstall leaves nothing of ours behind.
+  nft list table inet "$NFT_BROWSER_TABLE" >/dev/null 2>&1 \
+    && nft delete table inet "$NFT_BROWSER_TABLE" 2>/dev/null \
+    && echo "  removed the $NFT_BROWSER_TABLE table"
   ipv6_restore
   rm -rf "$STATE_DIR"
+  rm -f "$LOCK_FILE"
 
   # Before tor stops and before the binary goes: a boot unit left behind would
   # try to reconnect on the next boot with nothing installed to do it.
@@ -1879,8 +2115,9 @@ tormarchy -- route traffic through Tor, from the Omarchy bar.
   newnym                                   New circuit.
   exit <cc>|auto|--list                    Pin or clear the exit country.
   bridge <status|set|on|off|transports>    Use bridges where Tor is blocked.
-  browser [name]|--list                    Launch a browser that can reach
-                                           nothing but Tor.
+  browser [name]|--list                    Launch a browser, in an instance of
+                                           its own, that the firewall lets
+                                           reach nothing but Tor.
   speed [--json]                           One latency measurement.
   pingd [seconds]                          Stream live latency, one per line.
   doctor                                   Leak checks.
@@ -1909,6 +2146,8 @@ newnym)     cmd_newnym "$@" ;;
 exit)       cmd_exit "$@" ;;
 bridge)     cmd_bridge "$@" ;;
 browser)    cmd_browser "$@" ;;
+browser-exec) cmd_browser_exec "$@" ;;
+browser-lock) cmd_browser_lock "$@" ;;
 speed)      cmd_speed "$@" ;;
 pingd)      cmd_pingd "$@" ;;
 doctor)     cmd_doctor "$@" ;;

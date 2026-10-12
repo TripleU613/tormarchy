@@ -13,6 +13,7 @@ Item {
   property bool torRunning: false
   property bool connected: false
   property int bootstrap: 0
+  property bool controlPort: true
   property string mode: ""
   property string exitIp: ""
   property string exitCountry: ""
@@ -38,7 +39,10 @@ Item {
   // answer to "is it on" is whether tor itself is up.
   readonly property bool liveConnection: effectiveMode === "socks" ? torRunning : connected
   readonly property bool active: _desired === -1 ? liveConnection : (_desired === 1)
-  readonly property bool bootstrapping: torRunning && !connected && bootstrap < 100
+  // Only from a figure tor actually gave. With the control port unreachable the
+  // bootstrap reads 0 whatever tor is doing, and treating that as bootstrapping
+  // held browser-only at "0%" with no circuit allowed, indefinitely.
+  readonly property bool bootstrapping: torRunning && !connected && controlPort && bootstrap < 100
   property bool refreshing: false
   property string actionStatus: ""
   property string lastError: ""
@@ -99,7 +103,14 @@ Item {
   // every refresh -- an intermittent "the switch didn't take" that had nothing
   // to do with any action. `refreshing` already covers the poll for anything
   // that genuinely wants to know a status read is happening.
-  readonly property bool busy: actionProcess.running
+  readonly property bool busy: actionProcess.running || cancelProcess.running
+
+  // A connect spends most of its life waiting for tor to bootstrap -- up to two
+  // minutes, four if it falls back to bridges -- and the switch refused every
+  // click for all of it, so there was no way to change your mind. Turning it
+  // off during that wait now cancels: disconnect stops tor, connect sees tor go
+  // and gives up without applying anything.
+  readonly property bool canToggle: !busy || (actionProcess.running && _desired === 1 && !cancelProcess.running)
 
   // Whether there is a circuit worth measuring. Two things have to agree: the
   // switch says on (`active`, so flipping it off stops the gauge that same
@@ -173,6 +184,7 @@ Item {
     torRunning = parsed.torRunning
     connected = parsed.connected
     bootstrap = parsed.bootstrap
+    controlPort = parsed.controlPort
     mode = parsed.mode
     exitIp = parsed.exitIp
     exitCountry = parsed.exitCountry
@@ -205,10 +217,20 @@ Item {
   }
 
   function disconnect() {
+    if (actionProcess.running && _desired === 1 && !cancelProcess.running) {
+      // The connect cannot be killed from here -- it runs as root -- so it is
+      // cancelled the way connect itself watches for: tor stopping.
+      _desired = 0
+      actionStatus = qsTr("Cancelling…")
+      cancelProcess.command = ["bash", "-c", "exec tormarchy disconnect"]
+      cancelProcess.running = true
+      return
+    }
     run(["tormarchy", "disconnect"], 0, qsTr("Disconnecting…"))
   }
 
   function toggleConnected() {
+    if (!canToggle) return
     if (active) disconnect()
     else connect(effectiveMode)
   }
@@ -226,6 +248,12 @@ Item {
     latencyMs = 0
     speedError = ""
     latencyHistory = []
+    // The live stream too. Its whole trick is one kept-alive connection, and a
+    // connection stays on the circuit it was opened on: NEWNYM only moves new
+    // streams. Left running, the gauge went on timing the circuit you had just
+    // left. Stopped here, and started again once NEWNYM has taken effect, it
+    // opens its connection on the new one.
+    _pingHeld = true
     run(["tormarchy", "newnym"], -1, qsTr("Requesting a new circuit…"))
     measureAfterChange.restart()
   }
@@ -302,6 +330,9 @@ Item {
     onTriggered: root.refresh()
   }
 
+  // Holds the live stream off across a circuit change. See newCircuit().
+  property bool _pingHeld: false
+
   // Live latency, streamed from one persistent connection through the circuit.
   //
   // A long-running child rather than a timer firing one-shot measurements: the
@@ -311,7 +342,7 @@ Item {
   // there is no daemon to leak.
   Process {
     id: pingProcess
-    running: root.watching && root.circuitReady
+    running: root.watching && root.circuitReady && !root._pingHeld
     command: ["bash", "-c", "exec tormarchy pingd " + root.speedIntervalSec]
 
     stdout: SplitParser {
@@ -340,13 +371,13 @@ Item {
   }
 
   Timer {
-    // A fresh circuit is a different path, so measure it rather than sitting
-    // next to an empty gauge until the interval comes round. The delay lets
-    // NEWNYM actually take effect first.
+    // A fresh circuit is a different path. The delay lets NEWNYM take effect
+    // first, so the stream's new connection is built on the new circuit; its
+    // first reading then fills the gauge without waiting a full interval.
     id: measureAfterChange
     interval: 1500
     repeat: false
-    onTriggered: if (root.watching) root.measureSpeed()
+    onTriggered: root._pingHeld = false
   }
 
   Timer {
@@ -415,6 +446,13 @@ Item {
     onExited: function(exitCode) {
       var stdout = String(actionStdout.text || root._actionOutput || "")
       var stderr = String(actionStderr.text || root._actionError || "")
+      // A connect that a cancel just stopped fails by design. Its message is
+      // not news, and the cancel's own result is what gets reported.
+      if (cancelProcess.running || root._cancelled) {
+        root._cancelled = false
+        root._actionEpoch += 1
+        return
+      }
       if (exitCode !== 0) {
         // Drop the optimistic state: whatever we hoped for did not happen.
         root._desired = -1
@@ -426,6 +464,31 @@ Item {
         actionStatusTimer.restart()
       }
       // Everything read before this point is now stale.
+      root._actionEpoch += 1
+      settleTimer.ticks = 0
+      settleTimer.restart()
+      delayedRefresh.restart()
+    }
+  }
+
+  property bool _cancelled: false
+
+  Process {
+    id: cancelProcess
+    running: false
+    command: []
+    stderr: StdioCollector { id: cancelStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      // Tells the connect's own exit, which can land after this, to stay quiet.
+      root._cancelled = actionProcess.running
+      if (exitCode !== 0) {
+        root._desired = -1
+        root.lastError = Model.elide(String(cancelStderr.text || "") || qsTr("Could not cancel the connection"))
+        root.actionStatus = root.lastError
+      } else {
+        root.lastError = ""
+      }
+      actionStatusTimer.restart()
       root._actionEpoch += 1
       settleTimer.ticks = 0
       settleTimer.restart()

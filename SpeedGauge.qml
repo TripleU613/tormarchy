@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Shapes
 import qs.Commons
+import qs.Commons as Commons
 
 // Circular latency gauge. An arc from 135° round to 45° — the open-bottom dial
 // shape, so the gap reads as the bottom of a scale rather than a broken ring.
@@ -12,8 +13,8 @@ Item {
 
   // 0..1. Anything outside is clamped rather than drawn off the end of the arc.
   property real value: 0
-  property color color: Color.foreground
-  property color trackColor: Util.alpha(Color.foreground, 0.18)
+  property color color: Commons.Color.foreground
+  property color trackColor: Util.alpha(Commons.Color.foreground, 0.18)
   property real thickness: Math.max(2, size * 0.11)
   property real size: Style.space(78)
   property bool busy: false

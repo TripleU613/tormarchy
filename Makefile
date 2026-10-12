@@ -15,6 +15,7 @@ check-root:
 test:
 	python3 tests/test_qml_names.py
 	bash tests/test_decisions.sh
+	bash tests/test_helpers.sh
 	node tests/test_model.js
 
 
@@ -50,7 +51,7 @@ help:
 	@echo "hooks        enable auto-versioning on commit"
 	@echo "check        every CI check"
 	@echo "check-root   the same, plus nft validation against the kernel"
-	@echo "test         name collisions, pinned decisions, Model.js"
+	@echo "test         name collisions, pinned decisions, helpers, Model.js"
 	@echo "qml-check    qmllint, import noise filtered out"
 	@echo "install      sudo ./tormarchy setup"
 	@echo "reinstall    uninstall, setup, restart the shell"

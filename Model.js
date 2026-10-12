@@ -52,6 +52,8 @@ function parseStatus(raw) {
     torRunning: data.torRunning === true,
     connected: data.connected === true,
     bootstrap: clampPercent(data.bootstrap),
+    // Absent from older helpers, which only ever reported a reachable port.
+    controlPort: data.controlPort !== false,
     mode: isValidMode(data.mode) ? String(data.mode) : "",
     exitIp: String(data.exitIp || ""),
     exitCountry: String(data.exitCountry || ""),

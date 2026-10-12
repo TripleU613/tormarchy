@@ -1,0 +1,21 @@
+{
+ "installed": true,
+ "torRunning": true,
+ "connected": false,
+ "bootstrap": 100,
+ "mode": "socks",
+ "exitIp": "185.220.101.4",
+ "exitCountry": "se",
+ "requestedExit": "",
+ "circuitAgeSec": 61,
+ "path": [
+  "us",
+  "ch",
+  "se"
+ ],
+ "bytesRead": 2213990,
+ "bytesWritten": 311200,
+ "statusText": "Browser-only: SOCKS proxy on 127.0.0.1:9050",
+ "warnings": [],
+ "controlPort": true
+}

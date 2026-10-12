@@ -1,0 +1,391 @@
+"""Just enough of Quickshell, registered from Python, for Omarchy's own qs.Commons
+and qs.Ui -- and this plugin on top of them -- to compile and run under a stock
+Qt QML engine from PySide6. Nothing here talks to Wayland or runs anything.
+
+Shapes only: every type declares the properties and signals the shell's QML
+assigns to, because assigning to one that does not exist is a compile error,
+and a compile error is exactly what load.py is there to find. When Omarchy's
+components start using something new, load.py reports it as a host error and
+the property goes here.
+
+Process is the one stand-in with behaviour: it answers `tormarchy status
+--json` from the file in $TORMARCHY_STUB_STATUS, streams a fixed latency for
+`pingd`, and exits 0 for anything else.
+"""
+import os
+
+from PySide6.QtCore import QObject, Property, Signal, Slot, ClassInfo, QEnum, QTimer
+from PySide6.QtGui import QColor
+from PySide6.QtQml import (QmlElement, QmlSingleton, QmlAttached, QmlAnonymous,
+                           ListProperty, QmlUncreatable)
+from enum import IntEnum
+
+QML_IMPORT_MAJOR_VERSION = 1
+QML_IMPORT_MINOR_VERSION = 0
+
+
+def prop(typ, name, default=None):
+    """A plain read/write Qt property with a change signal."""
+    attr = "_" + name
+
+    def getter(self):
+        return getattr(self, attr, default)
+
+    def setter(self, value):
+        if getattr(self, attr, default) != value:
+            setattr(self, attr, value)
+            getattr(self, name + "Changed").emit()
+
+    return getter, setter
+
+
+def make_class(base, clsname, props, signals=(), extra=None):
+    ns = {}
+    for name, typ, default in props:
+        ns[name + "Changed"] = Signal()
+    for sig in signals:
+        if isinstance(sig, tuple):
+            ns[sig[0]] = Signal(*sig[1:])
+        else:
+            ns[sig] = Signal()
+    for name, typ, default in props:
+        g, s = prop(typ, name, default)
+        ns[name] = Property(typ, g, s, notify=ns[name + "Changed"])
+    if extra:
+        ns.update(extra)
+    return type(clsname, (base,), ns)
+
+
+def object_list(clsname, base=QObject, props=(), signals=(), extra=None):
+    """A QObject with a default `data` list property, so QML children nest."""
+
+    def _kids(self):
+        if not hasattr(self, "_children"):
+            self._children = []
+        return self._children
+
+    ns = dict(extra or {})
+    ns["data"] = ListProperty(QObject,
+                              append=lambda self, o: _kids(self).append(o),
+                              at=lambda self, i: _kids(self)[i],
+                              count=lambda self: len(_kids(self)),
+                              clear=lambda self: _kids(self).clear())
+    cls = make_class(base, clsname, props, signals, ns)
+    return ClassInfo(DefaultProperty="data")(cls)
+
+
+# ------------------------------------------------------------------ Quickshell
+
+QML_IMPORT_NAME = "Quickshell"
+
+
+@QmlElement
+@QmlSingleton
+class Quickshell(QObject):
+    screensChanged = Signal()
+
+    @Slot(str, result=str)
+    def env(self, name):
+        return os.environ.get(name, "")
+
+    @Slot("QVariant")
+    def execDetached(self, cmd):
+        pass
+
+    def _screens(self):
+        return []
+
+    screens = Property("QVariantList", _screens, notify=screensChanged)
+
+    def _shell_dir(self):
+        return ""
+
+    shellDir = Property(str, _shell_dir, constant=True)
+
+
+class QsWindowAttached(QObject):
+    windowChanged = Signal()
+    maskChanged = Signal()
+
+    def _w(self):
+        return None
+
+    window = Property(QObject, _w, notify=windowChanged)
+
+
+@QmlElement
+@QmlUncreatable("attached only")
+@QmlAttached(QsWindowAttached)
+class QsWindow(QObject):
+    @staticmethod
+    def qmlAttachedProperties(self, o):
+        return QsWindowAttached(o)
+
+
+Singleton = QmlElement(object_list("Singleton"))
+Scope = QmlElement(object_list("Scope"))
+ShellRoot = QmlElement(object_list("ShellRoot"))
+
+Anchors = QmlAnonymous(make_class(QObject, "WindowAnchors", [
+    ("top", bool, False), ("bottom", bool, False), ("left", bool, False), ("right", bool, False)]))
+Margins = QmlAnonymous(make_class(QObject, "WindowMargins", [
+    ("top", int, 0), ("bottom", int, 0), ("left", int, 0), ("right", int, 0)]))
+
+_window_props = [
+    ("screen", "QVariant", None), ("visible", bool, True), ("color", QColor, QColor("white")),
+    ("implicitWidth", float, 0.0), ("implicitHeight", float, 0.0),
+    ("width", float, 0.0), ("height", float, 0.0),
+    ("exclusiveZone", int, 0), ("exclusionMode", int, 0), ("focusable", bool, False),
+    ("mask", QObject, None), ("surfaceFormat", "QVariant", None),
+    ("contentItem", QObject, None), ("aboveWindows", bool, True),
+    ("backingWindowVisible", bool, False), ("devicePixelRatio", float, 1.0),
+    ("windowTransform", "QVariant", None),
+]
+
+
+def _window(name):
+    def anchors(self):
+        if not hasattr(self, "_anchors"):
+            self._anchors = Anchors()
+        return self._anchors
+
+    def margins(self):
+        if not hasattr(self, "_margins"):
+            self._margins = Margins()
+        return self._margins
+
+    return object_list(name, props=_window_props, signals=["windowConnected"], extra={
+        "anchors": Property(Anchors, anchors, constant=True),
+        "margins": Property(Margins, margins, constant=True),
+    })
+
+
+PanelWindow = QmlElement(_window("PanelWindow"))
+FloatingWindow = QmlElement(_window("FloatingWindow"))
+
+
+PopupAnchor = QmlAnonymous(make_class(QObject, "PopupAnchor", [
+    ("item", QObject, None), ("window", QObject, None), ("rect", "QVariant", None),
+    ("edges", int, 0), ("gravity", int, 0), ("adjustment", int, 0)]))
+
+
+def _popup_anchor(self):
+    if not hasattr(self, "_anchor"):
+        self._anchor = PopupAnchor()
+    return self._anchor
+
+
+PopupWindow = QmlElement(object_list("PopupWindow", props=_window_props, extra={
+    "anchor": Property(PopupAnchor, _popup_anchor, constant=True)}))
+
+Region = QmlElement(object_list("Region", props=[
+    ("item", QObject, None), ("x", int, 0), ("y", int, 0), ("width", int, 0), ("height", int, 0),
+    ("intersection", int, 0), ("shape", int, 0), ("radius", int, 0)],
+    extra={"regions": ListProperty(QObject, append=lambda self, o: None)}))
+
+TransformWatcher = QmlElement(make_class(QObject, "TransformWatcher", [
+    ("a", QObject, None), ("b", QObject, None), ("commonParent", QObject, None),
+    ("transform", "QVariant", None)]))
+
+Variants = QmlElement(object_list("Variants", props=[
+    ("model", "QVariant", None), ("delegate", "QQmlComponent*", None)]))
+LazyLoader = QmlElement(object_list("LazyLoader", props=[
+    ("active", bool, False), ("loading", bool, False), ("component", "QQmlComponent*", None),
+    ("source", str, ""), ("item", QObject, None)]))
+
+
+# ------------------------------------------------------------ Quickshell.Io
+
+QML_IMPORT_NAME = "Quickshell.Io"
+
+
+def _proc_get_running(self):
+    return getattr(self, "_running", False)
+
+
+def _proc_set_running(self, v):
+    if v == _proc_get_running(self):
+        return
+    self._running = v
+    self.runningChanged.emit()
+    if v:
+        QTimer.singleShot(0, lambda: _proc_run(self))
+
+
+def _proc_finish(self, code):
+    self._running = False
+    self.runningChanged.emit()
+    self.exited.emit(code, 0)
+
+
+def _proc_run(self):
+    if not _proc_get_running(self):
+        return
+    cmd = " ".join(str(c) for c in (getattr(self, "_command", []) or []))
+    out = getattr(self, "_stdout", None)
+    if "pingd" in cmd:
+        if out is not None and hasattr(out, "read"):
+            out.read.emit(os.environ.get("TORMARCHY_STUB_PING", "612"))
+        return  # keeps running, like the real stream
+    text = ""
+    if "status --json" in cmd:
+        path = os.environ.get("TORMARCHY_STUB_STATUS", "")
+        if not (path and os.path.exists(path)):
+            _proc_finish(self, 127)
+            return
+        text = open(path).read()
+    elif "exit --list" in cmd:
+        text = "de\nnl\nus\nse\nch\n"
+    if out is not None and hasattr(out, "streamFinished"):
+        out.setProperty("text", text)
+        out.streamFinished.emit()
+    _proc_finish(self, 0)
+
+
+_running_changed = Signal()
+Process = QmlElement(object_list("Process", props=[
+    ("command", "QVariantList", []), ("environment", "QVariantMap", {}),
+    ("clearEnvironment", bool, False), ("workingDirectory", str, ""),
+    ("stdout", QObject, None), ("stderr", QObject, None), ("stdinEnabled", bool, False),
+    ("processId", "QVariant", None)],
+    signals=[("exited", int, int), "started"],
+    extra={
+        "runningChanged": _running_changed,
+        "running": Property(bool, _proc_get_running, _proc_set_running, notify=_running_changed),
+        "startDetached": Slot()(lambda self: None),
+        "signal": Slot(int)(lambda self, s: None),
+        "write": Slot(str)(lambda self, s: None),
+    }))
+
+
+StdioCollector = QmlElement(make_class(QObject, "StdioCollector", [
+    ("text", str, ""), ("data", "QVariant", None), ("waitForEnd", bool, True)],
+    signals=["streamFinished"]))
+
+SplitParser = QmlElement(make_class(QObject, "SplitParser", [("splitMarker", str, "\n")],
+                                    signals=[("read", str)]))
+
+
+@QmlElement
+class IpcHandler(QObject):
+    targetChanged = Signal()
+    enabledChanged = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._target = ""
+        self._enabled = True
+
+    def _get_target(self):
+        return self._target
+
+    def _set_target(self, v):
+        self._target = v
+        self.targetChanged.emit()
+
+    def _get_enabled(self):
+        return self._enabled
+
+    def _set_enabled(self, v):
+        self._enabled = v
+        self.enabledChanged.emit()
+
+    target = Property(str, _get_target, _set_target, notify=targetChanged)
+    enabled = Property(bool, _get_enabled, _set_enabled, notify=enabledChanged)
+
+
+FileView = QmlElement(object_list("FileView", props=[
+    ("path", str, ""), ("watchChanges", bool, False), ("blockLoading", bool, False),
+    ("blockAllReads", bool, False), ("printErrors", bool, True), ("preload", bool, True),
+    ("atomicWrites", bool, True), ("loaded_", bool, False), ("adapter", QObject, None)],
+    signals=["loaded", "loadFailed", "fileChanged", "saved", "saveFailed"],
+    extra={
+        "text": Slot(result=str)(lambda self: ""),
+        "reload": Slot()(lambda self: None),
+        "setText": Slot(str)(lambda self, t: None),
+        "writeAdapter": Slot()(lambda self: None),
+    }))
+JsonAdapter = QmlElement(object_list("JsonAdapter"))
+
+
+# -------------------------------------------------------- Quickshell.Wayland
+
+QML_IMPORT_NAME = "Quickshell.Wayland"
+
+
+@QmlElement
+class WlrLayer(QObject):
+    class Layer(IntEnum):
+        Background = 0
+        Bottom = 1
+        Top = 2
+        Overlay = 3
+    QEnum(Layer)
+
+
+@QmlElement
+class WlrKeyboardFocus(QObject):
+    Focus = IntEnum("Focus", [("None", 0), ("Exclusive", 1), ("OnDemand", 2)])
+    QEnum(Focus)
+
+
+WlrLayershellAttached = make_class(QObject, "WlrLayershellAttached", [
+    ("namespace", str, ""), ("layer", int, 2), ("keyboardFocus", int, 0),
+    ("exclusionMode", int, 0)])
+
+
+@QmlElement
+@QmlUncreatable("attached only")
+@QmlAttached(WlrLayershellAttached)
+class WlrLayershell(QObject):
+    @staticmethod
+    def qmlAttachedProperties(self, o):
+        return WlrLayershellAttached(o)
+
+
+# ------------------------------------------------------- Quickshell.Hyprland
+
+QML_IMPORT_NAME = "Quickshell.Hyprland"
+
+
+@QmlElement
+@QmlSingleton
+class Hyprland(QObject):
+    focusedMonitorChanged = Signal()
+    monitorsChanged = Signal()
+
+    @Slot()
+    def refreshMonitors(self):
+        pass
+
+    @Slot(str)
+    def dispatch(self, s):
+        pass
+
+    def _none(self):
+        return None
+
+    focusedMonitor = Property(QObject, _none, notify=focusedMonitorChanged)
+    monitors = Property(QObject, _none, notify=monitorsChanged)
+
+
+HyprlandFocusGrab = QmlElement(make_class(QObject, "HyprlandFocusGrab", [
+    ("active", bool, False), ("windows", "QVariantList", [])], signals=["cleared"]))
+
+
+# --------------------------------------------- Quickshell.Services.Pipewire
+
+QML_IMPORT_NAME = "Quickshell.Services.Pipewire"
+
+
+@QmlElement
+@QmlSingleton
+class Pipewire(QObject):
+    changed = Signal()
+
+    def _none(self):
+        return None
+
+    defaultAudioSource = Property(QObject, _none, notify=changed)
+    defaultAudioSink = Property(QObject, _none, notify=changed)
+    ready = Property(bool, lambda self: False, notify=changed)

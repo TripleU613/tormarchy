@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // "TORMARCHY" as a 5x7 bitmap wordmark.
 //
@@ -11,7 +12,7 @@ import qs.Commons
 Item {
   id: root
 
-  property color color: Color.foreground
+  property color color: Commons.Color.foreground
 
   // Size of one block. Ignored when maxWidth is set.
   property real blockSize: 4

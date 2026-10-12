@@ -20,6 +20,7 @@ skipped otherwise, and it's the part that matters most.
 | `Model.js` | Parsing and formatting. No Qt in here, so it's testable with `node`. |
 | `TorIcon` / `TorWordmark` / `SpeedGauge` | Drawn in QML, no image files. |
 | `etc/` | What `setup` installs: torrc snippet, polkit policy and rule, tmpfiles. |
+| `tests/` | Pinned decisions, helper behaviour, Model.js, and the Qt load check. |
 
 ## Working on it
 
@@ -39,6 +40,28 @@ To see what the shell thought of your QML:
 grep -i error /run/user/$UID/quickshell/by-pid/$(pgrep -f 'quickshell.*omarchy/shell' | head -1)/log.log
 ```
 
+## Loading it without a shell
+
+The shell loads the widget with `Qt.createComponent` and, if that fails, logs a
+line and leaves it out of the bar. The plugin still installs and enables, so the
+only symptom is that nothing appears. `tests/qml/load.py` reproduces that load
+off the machine, against a real Qt engine and Omarchy's own `qs.Commons` and
+`qs.Ui`, and fails on any error or warning the plugin's QML raises:
+
+```bash
+pip install PySide6
+python3 tests/qml/load.py --omarchy ~/src/omarchy            # or /usr/share/omarchy
+python3 tests/qml/load.py --omarchy ~/src/omarchy \
+  --status tests/qml/fixtures/on.json --bar bar.png --panel panel.png
+```
+
+The fixtures stand in for `tormarchy status --json` in each state, and
+`--bar`/`--panel` save what the bar icon and the open panel look like.
+
+Read palette colours through the alias, `import qs.Commons as Commons` then
+`Commons.Color.foreground`. Qt 6.12 has a `Color` of its own, and a bare
+`Color.foreground` now quietly resolves to it and comes back undefined.
+
 ## If you touch the firewall
 
 The ruleset is the part that can take someone's network down, so it gets more
@@ -52,6 +75,10 @@ sudo ./tormarchy connect --dry-run strict | sudo nft -c -f -
 to the LAN router, `.onion` UDP escaping through the `10.0.0.0/8` exemption,
 forwarded traffic bypassing the output hook entirely. If you reorder rules and
 one of those fails, it is not the test being fussy.
+
+`tests/test_helpers.sh` runs the script's own functions with the machine stubbed
+out — IPv6 save and restore, the boot marker, circuit selection, the status
+JSON. The IPv6 cases need root and skip themselves without it.
 
 Rules only ever go on after Tor reports a full bootstrap, and nothing is
 persisted to `/etc/nftables.conf`, so a reboot always restores normal

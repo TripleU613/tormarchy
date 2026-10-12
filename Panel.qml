@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
-import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -22,20 +22,36 @@ Panel {
   property int modeIndex: 0
   property bool cursorActive: false
 
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
-  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  // Every palette read goes through the Commons alias. Qt 6.12 ships a `Color`
+  // type of its own, and a bare `Color.accent` now resolves to that instead of
+  // the theme singleton -- it evaluates to undefined, and a colour property
+  // given undefined falls back to black. That is what painted the switch's
+  // "on" track black on a dark bar, so it looked as if it never turned on.
+  readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
+  readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
   // Straight from the theme singleton: the bar exposes foreground, barForeground
-  // and urgent, but no accent, so there is nothing to prefer over Color here.
-  readonly property color accent: Color.accent
+  // and urgent, but no accent, so there is nothing to prefer over it here.
+  readonly property color accent: Commons.Color.accent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  // The onion only lights up once traffic is actually going through Tor.
-  // Bootstrapping is a distinct, dimmer state — claiming "on" before the
-  // circuit exists is the one lie a Tor indicator must never tell.
-  readonly property color barIconColor: tor.active && tor.connected
-    ? barForeground
-    : Qt.darker(barForeground, tor.bootstrapping ? 1.25 : 1.55)
+  // The onion's state, in order of what most needs saying.
+  //
+  // It only lights up once traffic is actually going through Tor. Bootstrapping
+  // is a distinct state with a pulsing core -- claiming "on" before the circuit
+  // exists is the one lie a Tor indicator must never tell. Browser-only with Tor
+  // up keeps the core but not the layers: Tor is there, the system is not routed
+  // through it. And rules applied with no Tor behind them is the kill switch
+  // holding the network shut, which is worth the urgent colour: the machine has
+  // gone quiet on purpose, and this is where the user will look to find out why.
+  readonly property bool barBlocked: tor.connected && !tor.torRunning
+  readonly property bool barRouted: tor.active && tor.connected && tor.torRunning
+  readonly property bool barBrowserOnly: tor.active && tor.effectiveMode === "socks"
+    && tor.torRunning && !tor.bootstrapping
+  readonly property bool barConnecting: tor.active && !barRouted && !barBrowserOnly && !barBlocked
+
+  readonly property color barIconColor: barBlocked ? urgent : barForeground
+  readonly property real barLayerOpacity: barBlocked || barRouted ? 1.0 : 0.45
 
   // Our own directory, so the pre-setup path can point at the bundled
   // ./setup without the helpers being installed yet.
@@ -43,12 +59,15 @@ Panel {
     .replace(/^file:\/\//, "").replace(/\/$/, "")
 
 
-  // Exit selection only makes sense once tor is up and actually carrying
-  // traffic; in socks mode there is no system-wide circuit to steer.
+  // In every mode, browser-only included. ExitNodes is a torrc setting, so it
+  // steers every circuit tor builds -- the SOCKS circuits a browser-only
+  // browser uses just as much as the transparent ones. Hiding it there left an
+  // empty column in the header and took away a control that works.
+  //
   // Deliberately NOT gated on torRunning. The exit tile is structural: hiding
   // it while disconnected collapses a column and the panel reads as broken
   // rather than as idle. It shows its placeholder and waits instead.
-  readonly property bool showExit: tor.installed && tor.effectiveMode !== "socks"
+  readonly property bool showExit: tor.installed
   readonly property var recentExits: root.setting("recentExits", [])
 
   // The panel's only layout grid: three equal columns and two gutters.
@@ -188,8 +207,10 @@ Panel {
     else if (focusSection === "mode") tor.setMode(Model.MODE_ORDER[modeIndex])
   }
 
+  // canToggle rather than !busy: a connect still waiting on tor's bootstrap can
+  // be switched off, which cancels it.
   function toggleConnected() {
-    if (tor.installed && !tor.busy) tor.toggleConnected()
+    if (tor.installed && tor.canToggle) tor.toggleConnected()
   }
 
   function chooseExit(code) {
@@ -223,18 +244,6 @@ Panel {
     exitPicker.open()
   }
 
-
-  // Reuse the first-party speed test rather than rolling our own: while a
-  // transparent ruleset is up, everything it measures already goes through
-  // the circuit, so this reports Tor throughput for free.
-  function summonSpeedTest() {
-    if (!bar || !bar.shell) return
-    close()
-    var label = tor.connected
-      ? ("Tor" + (tor.exitCountry ? " · " + tor.exitCountry.toUpperCase() : ""))
-      : ""
-    bar.shell.summon("omarchy.speedtest", label ? JSON.stringify({ connection: label }) : "{}")
-  }
 
   // Setup is the one genuinely interactive step (pacman, a polkit policy, a
   // group change), so it gets a real terminal instead of a silent pkexec.
@@ -280,7 +289,10 @@ Panel {
     function onModeChanged() { root.ensureCursor() }
   }
 
-  IpcHandler {
+  // ShellIpc rather than a bare IpcHandler: it also registers with the shell's
+  // own socket, so `omarchy-shell tripleu.tor toggle` reaches it without
+  // starting a qs ipc client, the same as every first-party panel.
+  ShellIpc {
     target: root.ipcTarget
     function open(): void { root.open() }
     function close(): void { root.close() }
@@ -290,7 +302,12 @@ Panel {
     function refresh(): string { tor.refresh(); return "ok" }
     function connect(): string { tor.connect(tor.effectiveMode); return "ok" }
     function disconnect(): string { tor.disconnect(); return "ok" }
-    function newCircuit(): string { tor.newCircuit(); return "ok" }
+    function newCircuit(): string {
+      if (!tor.canNewCircuit) return "tor is not connected"
+      tor.newCircuit()
+      return "ok"
+    }
+    function toggleTor(): string { root.toggleConnected(); return "ok" }
     function status(): string { return tor.statusText }
   }
 
@@ -298,22 +315,26 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // The mark alone. No label of any kind: state is carried by the icon's
-    // colour, and the panel is one click away for anything more specific.
+    // The mark alone, no label: the state is in the icon itself, and the
+    // panel is one click away for anything more specific. The tooltip says it
+    // in words for anyone who has not learned the icon yet.
+    tooltipText: tor.statusText
+    // No position of its own. BarIconContent measures what the mark paints,
+    // scales it to the bar's icon size and centres it on the slot, exactly as
+    // it does every first-party glyph -- placing it here as well only fought
+    // that, and lost.
     iconComponent: Component {
       TorIcon {
-        // Rounded rather than anchors.centerIn: the button's width and the
-        // glyph's can differ in parity, and centring then lands the mark on a
-        // half pixel even once the glyph itself is a whole number of them.
-        x: Math.round((parent.width - width) / 2)
-        y: Math.round((parent.height - height) / 2)
-        iconSize: Style.space(13)
+        iconSize: Style.bar.iconSize
         color: root.barIconColor
+        layerOpacity: root.barLayerOpacity
+        coreVisible: root.barRouted || root.barBrowserOnly || root.barBlocked || root.barConnecting
+        pulsing: root.barConnecting
       }
     }
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) root.toggleConnected()
-      else if (buttonCode === Qt.MiddleButton) tor.newCircuit()
+      else if (buttonCode === Qt.MiddleButton) { if (tor.canNewCircuit) tor.newCircuit() }
       else root.toggle()
     }
   }
@@ -341,10 +362,9 @@ Panel {
       onTextKey: function(t) {
         var key = String(t || "").toLowerCase()
         if (key === "t") root.toggleConnected()
-        else if (key === "n") tor.newCircuit()
+        else if (key === "n") { if (tor.canNewCircuit) tor.newCircuit() }
         else if (key === "e") root.openExitPicker()
         else if (key === "s") tor.measureSpeed()
-        else if (t === "S") root.summonSpeedTest()
         else if (key === "r") tor.refresh()
       }
 
@@ -474,7 +494,7 @@ Panel {
                 Text {
                   width: parent.width
                   elide: Text.ElideRight
-                  text: tor.connected && tor.exitCountry !== ""
+                  text: tor.circuitReady && tor.exitCountry !== ""
                     ? qsTr("EXIT · %1").arg(tor.exitCountry.toUpperCase())
                     : qsTr("EXIT")
                   horizontalAlignment: Text.AlignLeft
@@ -484,30 +504,46 @@ Panel {
                   font.letterSpacing: 0.8
                 }
 
-              SearchableDropdown {
-                id: exitPicker
-                width: topRow.countryWidth
-                rowHeight: topRow.controlHeight
-                showLabel: false
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                // Short on purpose. The popup is only as wide as this trigger,
-                // and the shared component draws these strings without a width
-                // or elide -- a long one prints straight out of the popup and
-                // across the panel behind it.
-                placeholderText: qsTr("Search…")
-                emptyText: tor.loadingExitCountries ? qsTr("Loading…")
-                  : (tor.torRunning ? qsTr("None found") : qsTr("Not connected"))
-                options: Model.exitOptions(tor.exitCountries)
-                value: tor.requestedExit === "" ? "auto" : tor.requestedExit
-                triggerLabel: Model.exitLabel(tor.requestedExit)
-                hasCursor: root.cursorActive && root.focusSection === "exit"
-                onChanged: function(value) { root.chooseExit(value) }
-                onHovered: function(isHovered) {
-                  if (isHovered) { root.cursorActive = true; root.focusSection = "exit" }
+                SearchableDropdown {
+                  id: exitPicker
+                  width: topRow.countryWidth
+                  rowHeight: topRow.controlHeight
+                  showLabel: false
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  // Short on purpose. The popup is only as wide as this trigger,
+                  // and the shared component draws these strings without a width
+                  // or elide -- a long one prints straight out of the popup and
+                  // across the panel behind it.
+                  placeholderText: qsTr("Search…")
+                  emptyText: tor.loadingExitCountries ? qsTr("Loading…")
+                    : (tor.torRunning ? qsTr("None found") : qsTr("Not connected"))
+                  options: Model.exitOptions(tor.exitCountries)
+                  value: tor.requestedExit === "" ? "auto" : tor.requestedExit
+                  triggerLabel: Model.exitLabel(tor.requestedExit)
+                  hasCursor: root.cursorActive && root.focusSection === "exit"
+                  onChanged: function(value) { root.chooseExit(value) }
+                  onHovered: function(isHovered) {
+                    if (isHovered) { root.cursorActive = true; root.focusSection = "exit" }
+                  }
                 }
               }
-              }
+            }
+
+            // What the status reports as wrong, said where it will be read.
+            // The one that matters most is the kill switch holding: rules on,
+            // tor gone, the network shut on purpose. The switch still reads ON
+            // then, correctly, and without this nothing on screen explained why
+            // the machine had gone quiet.
+            Text {
+              width: parent.width
+              visible: text !== ""
+              wrapMode: Text.WordWrap
+              textFormat: Text.PlainText
+              text: tor.warnings.length > 0 ? String(tor.warnings[0]) : ""
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
             }
 
             // Band 2 -- two paired surfaces of identical height and border:
@@ -754,7 +790,7 @@ Panel {
                 width: parent.width
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
-                text: qsTr("To continue, we need privileged rights.")
+                text: qsTr("One-time setup, then it's a toggle.")
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
@@ -764,7 +800,7 @@ Panel {
                 width: parent.width
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
-                text: qsTr("Setup installs tor, the helpers, and a polkit rule.")
+                text: qsTr("Installs tor and the helper in a terminal with sudo, so the switch never asks for a password.")
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -805,7 +841,7 @@ Panel {
               fontFamily: root.fontFamily
             }
 
-// One connected control: a single outer rectangle with two
+            // One connected control: a single outer rectangle with two
             // internal separators. Three bordered boxes with gaps between them
             // read as three unrelated buttons rather than one choice of three.
             Rectangle {
