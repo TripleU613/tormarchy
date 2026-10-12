@@ -291,6 +291,9 @@ def _proc_run(self):
         text = _fixture("TORMARCHY_STUB_BRIDGE_CHECK") or ""
     elif argv[:1] == ["wl-paste"]:
         text = _fixture("TORMARCHY_STUB_CLIPBOARD") or ""
+    elif "cmp -s" in cmd:
+        # The installed helper against the bundled one: 1 when they differ.
+        code = int(os.environ.get("TORMARCHY_STUB_HELPER_STALE", "0"))
     elif argv[:1] == ["omarchy-notification-send"]:
         text = "7\n" if "-p" in argv else ""
     elif "exit --list" in cmd:

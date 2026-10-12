@@ -96,6 +96,15 @@ out — IPv6 save and restore, the boot marker, circuit selection and relay
 details, exit exclusions, bridge parsing, the doctor and status JSON. The IPv6
 and bridge-summary cases need root and skip themselves without it.
 
+`tests/kernel/killswitch.sh` puts the real ruleset on in a network namespace and
+proves, in a real kernel, that nothing reaches the wire and that a connection
+open before the switch fails at once. `check.sh` runs it when it has root and
+namespaces; elsewhere it skips.
+
+`tests/menu.js` checks Tor's rows in the Omarchy menu with the menu's own parser,
+from the Omarchy checkout you give it: `node tests/menu.js ~/src/omarchy`.
+`shell.sh` runs it against every checkout it is given.
+
 ## If you touch the panel's tools
 
 The leak check makes real requests, so it runs when asked and never from a

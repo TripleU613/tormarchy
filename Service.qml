@@ -109,6 +109,21 @@ Item {
   // requests -- check.torproject.org, and a deliberate attempt to reach an IPv6
   // host directly -- and the same rule as the latency gauge applies. Traffic
   // nobody asked for is a pattern this tool should not add on anyone's behalf.
+  // The helper the panel runs is the copy setup put in /usr/local/bin, and a
+  // plugin update does not touch it: without setup again, a new plugin talks to
+  // an old helper, and every change that lives in the helper never arrives.
+  // Compared byte for byte with the one this plugin ships.
+  property string bundledHelper: ""
+  property bool helperStale: false
+  function checkHelper() {
+    if (helperCheckProcess.running || bundledHelper === "" || !installed) return
+    helperCheckProcess.command = ["bash", "-c", "cmp -s -- \"$1\" \"$(command -v tormarchy)\"",
+                                  "check-helper", bundledHelper]
+    helperCheckProcess.running = true
+  }
+  onInstalledChanged: checkHelper()
+  onBundledHelperChanged: checkHelper()
+
   property bool checkingLeaks: false
   property var leakResult: null
   property double leakCheckedAtMs: 0
@@ -457,7 +472,10 @@ Item {
         on ? qsTr("Turning bridges on…") : qsTr("Turning bridges off…"))
   }
 
-  onWatchingChanged: if (!watching) cancelBridges()
+  onWatchingChanged: {
+    if (!watching) cancelBridges()
+    else checkHelper()
+  }
 
   function loadExitCountries() {
     if (exitListProcess.running || !torRunning) return
@@ -696,6 +714,15 @@ Item {
       settleTimer.restart()
       delayedRefresh.restart()
     }
+  }
+
+  Process {
+    id: helperCheckProcess
+    running: false
+    command: []
+    // 1 is "they differ"; anything else -- the same, or not comparable -- is
+    // not worth a prompt.
+    onExited: function(exitCode) { root.helperStale = exitCode === 1 }
   }
 
   Process {

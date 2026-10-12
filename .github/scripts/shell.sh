@@ -50,6 +50,9 @@ for omarchy in "${omarchies[@]}"; do
 
   echo "== scenarios"
   "$python" tests/qml/scenarios.py --omarchy "$omarchy" || failures=$(( failures + 1 ))
+
+  echo "== menu"
+  node tests/menu.js "$omarchy" || failures=$(( failures + 1 ))
 done
 
 echo

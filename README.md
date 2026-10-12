@@ -24,9 +24,13 @@ sudo ~/.config/omarchy/plugins/tripleu.tor/tormarchy setup
 `setup` needs a terminal and tells you everything it touches as it goes. For the
 record, that's: `tor` installed, `tormarchy` copied to `/usr/local/bin`, a config
 snippet in `/etc/tor/torrc.d/`, one line added to `/etc/tor/torrc`, a polkit rule
-so the toggle doesn't ask for a password, your user added to the `tor` group, and
-`/var/lib/tor` loosened to `0750` so it can read Tor's control cookie. It doesn't
-touch your Firefox or browser profiles — browser mode makes its own.
+so the toggle doesn't ask for a password, your user added to the `tor` group,
+`/var/lib/tor` loosened to `0750` so it can read Tor's control cookie, and Tor
+added to the Omarchy menu. It doesn't touch your Firefox or browser profiles —
+browser mode makes its own.
+
+Run `setup` again after updating the plugin: the helper it installs is a copy,
+and only `setup` refreshes it. The panel shows **Update helper** when it's due.
 
 ## Removing it
 
@@ -35,8 +39,8 @@ sudo ~/.config/omarchy/plugins/tripleu.tor/tormarchy uninstall
 omarchy plugin remove tripleu.tor
 ```
 
-`uninstall` puts all of the above back, including `/var/lib/tor`, and takes the
-firewall rules down first so you can't end up without a network. Add `--purge` to
+`uninstall` puts all of the above back, including `/var/lib/tor` and the menu,
+and takes the firewall rules down first so you can't end up without a network. Add `--purge` to
 also drop the `tor` package and your group membership.
 
 ## Modes
@@ -158,15 +162,15 @@ connects and the bridge fallback, or `off` for silence.
 | `tormarchy browser` | Launch a browser the firewall locks to Tor. `--list` shows what it found. |
 | `tormarchy doctor` | Check for leaks. `--json` for scripts. |
 | `tormarchy boot enable` | Reconnect at boot if Tor was on when you shut down. Off by default. |
+| `tormarchy menu add` | Tor in the Omarchy menu. `setup` does this; `menu remove` takes it out. |
 | `tormarchy panic` | Rip out every rule. For when things go wrong. |
 
 Tab completion for all of it, bash and zsh, installed by `setup`.
 
 ## Shortcuts
 
-Nothing here edits your config. If you want them, paste them in.
-
-A key for the panel and one for the toggle, in `~/.config/hypr/bindings.lua`:
+Keys are yours to pick, so these aren't added for you. A key for the panel and
+one for the toggle, in `~/.config/hypr/bindings.lua`:
 
 ```lua
 o.bind("SUPER + CTRL + SHIFT + T", "Tor", "omarchy-shell tripleu.tor toggle")
@@ -177,20 +181,14 @@ Plain commands on purpose, since they work on every Omarchy 4. The `{ panel = �
 shorthand is newer than the 4.0 releases, and `{ ipc = "..." }` splits its
 target at the first dot, which `tripleu.tor` has.
 
-A Tor submenu in the Omarchy menu, inside the braces of
-`~/.config/omarchy/extensions/omarchy-menu.jsonc`:
+## In the Omarchy menu
 
-```jsonc
-"tor": {"icon": "󰕥", "label": "Tor"},
-"tor.toggle": {"icon": "󰕥", "label": "Route through Tor", "action": "omarchy-shell tripleu.tor toggleTor", "checked": "test -e /run/tormarchy/active"},
-"tor.panel": {"icon": "󰒓", "label": "Open panel", "action": "omarchy-shell tripleu.tor open"},
-"tor.newnym": {"icon": "󰑐", "label": "New circuit", "action": "omarchy-shell tripleu.tor newCircuit"},
-"tor.leaks": {"icon": "󰄬", "label": "Leak check", "action": "omarchy-shell tripleu.tor checkLeaks"},
-"tor.bridges": {"icon": "󰘘", "label": "Bridges", "action": "omarchy-shell tripleu.tor bridges"},
-```
-
-The ✓ check is a file test rather than `tormarchy status`, because the menu runs
-every check each time it opens.
+`setup` adds **Trigger › Toggle › Tor**, ticked while you're connected, and a
+**Trigger › Tor** submenu: connect or disconnect, new circuit, the panel, the leak
+check and bridges. Omarchy gives plugins no menu of their own, so these live in
+your `~/.config/omarchy/extensions/omarchy-menu.jsonc`, between two marker
+comments. Nothing else in that file is touched, a symlinked one stays a symlink,
+and `tormarchy menu remove` takes them back out.
 
 ## If it breaks
 

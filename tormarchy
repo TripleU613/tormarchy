@@ -2254,6 +2254,157 @@ USAGE
   esac
 }
 
+# ---- the Omarchy menu ----
+#
+# Omarchy has no way for a plugin to add menu rows of its own: the menu reads
+# its shipped defaults and the user's extension file, nothing else. So Tor's
+# rows go in that file, as a block between two marker comments that this command
+# owns -- written by `menu add`, rewritten in place by a later add, taken out by
+# `menu remove`. Everything outside the markers is left exactly as it was.
+#
+# Always the user's own file, written as that user, never as root: setup runs
+# this through runuser. Root writing into a home directory follows whatever
+# symlinks the user has there.
+
+MENU_BEGIN="// >>> tormarchy: written by 'tormarchy menu add'. Edits between these lines are replaced."
+MENU_END="// <<< tormarchy"
+# On: rules applied, or browser-only with tor up. The menu runs every check each
+# time it opens, so this is a file test before it is anything slower.
+MENU_ON='[ -e /run/tormarchy/active ] || { grep -qx socks /run/tormarchy/mode 2>/dev/null && systemctl is-active -q tor; }'
+
+# The menu reads $HOME/.config whatever XDG_CONFIG_HOME says, so this does too.
+menu_file() { printf '%s/.config/omarchy/extensions/omarchy-menu.jsonc' "$HOME"; }
+
+menu_block() {
+  local on=$MENU_ON
+  cat <<BLOCK
+  $MENU_BEGIN
+  "trigger.toggle.tor": {"icon":"󰕥","label":"Tor","checked":"$on","action":"omarchy-shell tripleu.tor toggleTor"},
+  "trigger.tor": {"icon":"󰕥","label":"Tor"},
+  "trigger.tor.connect": {"icon":"󰕥","label":"Connect","when":"! { $on; }","action":"omarchy-shell tripleu.tor connect"},
+  "trigger.tor.disconnect": {"icon":"󰦞","label":"Disconnect","when":"$on","action":"omarchy-shell tripleu.tor disconnect"},
+  "trigger.tor.new-circuit": {"icon":"󰑐","label":"New Circuit","when":"$on","action":"omarchy-shell tripleu.tor newCircuit"},
+  "trigger.tor.panel": {"icon":"󰒓","label":"Panel","action":"omarchy-shell tripleu.tor open"},
+  "trigger.tor.leak-check": {"icon":"󰄬","label":"Leak Check","action":"omarchy-shell tripleu.tor checkLeaks"},
+  "trigger.tor.bridges": {"icon":"󰘘","label":"Bridges","action":"omarchy-shell tripleu.tor bridges"},
+  $MENU_END
+BLOCK
+}
+
+# The file without our block.
+menu_without_block() {
+  awk -v begin="${MENU_BEGIN%%:*}" -v end="$MENU_END" '
+    { line = $0; sub(/^[[:space:]]+/, "", line) }
+    !skipping && index(line, begin) == 1 { skipping = 1; next }
+    skipping { if (index(line, end) == 1) skipping = 0; next }
+    { print }' "$1"
+}
+
+# Our block, right after the opening brace: entries end in commas, which the
+# menu's parser drops before a closing brace, so this is valid whatever follows.
+menu_with_block() {
+  MENU_BLOCK=$(menu_block) awk '
+    !done && !/^[[:space:]]*\/\// {
+      i = index($0, "{")
+      if (i) {
+        print substr($0, 1, i)
+        print ENVIRON["MENU_BLOCK"]
+        rest = substr($0, i + 1)
+        if (rest ~ /[^[:space:]]/) print rest
+        done = 1
+        next
+      }
+    }
+    { print }
+    END { if (!done) exit 3 }'
+}
+
+# Parsed the way the menu parses it: whole-line comments and trailing commas
+# stripped, then JSON. sed -z takes the file whole, so a trailing comma is found
+# across the line break before its brace. Without jq there is no checking it,
+# and the change is structural enough to make anyway.
+menu_parses() {
+  command -v jq >/dev/null 2>&1 || return 0
+  sed -z -E 's#(^|\n)[[:space:]]*//[^\n]*#\1#g; s#,([[:space:]]*[]}])#\1#g' -- "$1" \
+    | jq -e 'type == "object"' >/dev/null 2>&1
+}
+
+menu_write() {   # menu_write add|remove
+  local file target dir tmp
+  file=$(menu_file)
+  # Through a dotfiles symlink to the file it points at, so the link survives.
+  target=$(readlink -f -- "$file" 2>/dev/null) || target=$file
+  dir=$(dirname -- "$target")
+
+  if [[ $1 == remove && ! -f $target ]]; then
+    echo "No Tormarchy entries in the Omarchy menu."
+    return 0
+  fi
+  if [[ -f $target ]] && ! menu_parses "$target"; then
+    die "$file does not parse as it is; fix it first, nothing was changed"
+  fi
+  mkdir -p -- "$dir" || die "could not create $dir"
+  tmp=$(mktemp -- "$target.XXXXXX") || die "could not write next to $target"
+
+  if [[ ! -s $target ]]; then
+    if [[ $1 == add ]]; then
+      { echo "{"; menu_block; echo "}"; } >"$tmp"
+    else
+      : >"$tmp"
+    fi
+  elif [[ $1 == add ]]; then
+    menu_without_block "$target" | menu_with_block >"$tmp" \
+      || { rm -f -- "$tmp"; die "$file has no opening brace; fix it first, nothing was changed"; }
+  else
+    menu_without_block "$target" >"$tmp"
+  fi
+
+  if ! menu_parses "$tmp"; then
+    rm -f -- "$tmp"
+    die "the menu would not parse after the change, so nothing was changed"
+  fi
+  [[ -f $target ]] && chmod --reference="$target" -- "$tmp" 2>/dev/null
+  mv -f -- "$tmp" "$target" || { rm -f -- "$tmp"; die "could not replace $file"; }
+}
+
+# Run as the person who ran sudo, in their own home.
+menu_as_user() {   # menu_as_user <user> <add|remove>
+  local user=$1 verb=$2 home
+  [[ -n $user && $user != root ]] || return 1
+  home=$(getent passwd "$user" | cut -d: -f6)
+  [[ -n $home && -d $home ]] || return 1
+  runuser -u "$user" -- env HOME="$home" "$SELF" menu "$verb"
+}
+
+cmd_menu() {
+  if (( EUID == 0 )); then
+    # sudo tormarchy menu add means the person behind sudo, never root's home.
+    menu_as_user "${SUDO_USER:-}" "${1:-status}" && return
+    die "run this as yourself, not as root"
+  fi
+  case "${1:-status}" in
+  add)
+    menu_write add
+    echo "Tor is in the Omarchy menu: Trigger > Tor, and Trigger > Toggle > Tor."
+    ;;
+  remove)
+    menu_write remove
+    echo "Removed Tormarchy's entries from the Omarchy menu."
+    ;;
+  status)
+    if [[ -f $(menu_file) ]] && grep -qF -- "${MENU_BEGIN%%:*}" "$(menu_file)"; then
+      echo "Tor is in the Omarchy menu."
+    else
+      echo "Tor is not in the Omarchy menu. Add it with: tormarchy menu add"
+    fi
+    ;;
+  *)
+    echo "Usage: tormarchy menu <add|remove|status>" >&2
+    return 1
+    ;;
+  esac
+}
+
 # ---- install / remove ----
 
 cmd_setup() {
@@ -2386,6 +2537,12 @@ cmd_setup() {
     fi
   fi
 
+  if [[ -n $target_user ]]; then
+    step "Adding Tor to the Omarchy menu"
+    menu_as_user "$target_user" add | sed 's/^/  /' \
+      || echo "  could not; add it later with: tormarchy menu add"
+  fi
+
   # Deliberately not enabled at boot. Tor starting itself every boot would be a
   # surprise, and the ruleset is applied by connect, never at boot -- which is
   # what guarantees a reboot always restores normal networking.
@@ -2452,6 +2609,13 @@ cmd_uninstall() {
   systemctl disable tor.service 2>/dev/null || true
   systemctl reset-failed tor.service 2>/dev/null || true
   echo "  stopped and disabled"
+
+  # Before the files go: these rows would otherwise call a command that is no
+  # longer there.
+  if [[ -n ${SUDO_USER:-} ]]; then
+    step "Removing Tor from the Omarchy menu"
+    menu_as_user "$SUDO_USER" remove | sed 's/^/  /' || echo "  nothing to remove"
+  fi
 
   step "Removing files"
   rm -f "$BIN_DIR/tormarchy"
@@ -2528,6 +2692,7 @@ tormarchy -- route traffic through Tor, from the Omarchy bar.
   pingd [seconds]                          Stream live latency, one per line.
   doctor [--json]                          Leak checks.
   boot <status|enable|disable>             Reconnect at boot if Tor was on.
+  menu <add|remove|status>                 Tor in the Omarchy menu. setup adds it.
   panic                                    Remove every rule. The escape hatch.
   setup / uninstall [--purge]              Install or remove the system side.
                                            Terminal + sudo only.
@@ -2550,6 +2715,7 @@ status)     cmd_status "$@" ;;
 ip)         cmd_ip "$@" ;;
 newnym)     cmd_newnym "$@" ;;
 exit)       cmd_exit "$@" ;;
+menu)       cmd_menu "$@" ;;
 bridge)     cmd_bridge "$@" ;;
 browser)    cmd_browser "$@" ;;
 browser-exec) cmd_browser_exec "$@" ;;

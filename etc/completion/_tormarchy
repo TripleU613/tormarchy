@@ -18,6 +18,7 @@ _tormarchy() {
     'doctor:Leak checks'
     'panic:Remove every rule'
     'boot:Reconnect at boot'
+    'menu:Tor in the Omarchy menu'
     'setup:Install the system side'
     'uninstall:Remove the system side'
     'help:Show usage'
@@ -33,6 +34,7 @@ _tormarchy() {
     mode)      _values 'mode' 'lan' 'strict' 'socks' ;;
     bridge)    _values 'verb' 'status' 'set' 'check' 'on' 'off' 'transports' ;;
     boot)      _values 'verb' 'status' 'enable' 'disable' ;;
+    menu)      _values 'verb' 'add' 'remove' 'status' ;;
     status|speed|ip|doctor) _values 'flag' '--json' ;;
     uninstall) _values 'flag' '--purge' ;;
     exit)

@@ -331,6 +331,32 @@ reject "the root helper takes no bridge file argument" tormarchy 'bridge set <fi
 want "the panel-readable summary is counts only" tormarchy 'bridge_counts "$BRIDGE_STASH" >"$staging"'
 
 echo
+echo "The Omarchy menu"
+
+# The menu file is the user's, so it is written as the user: root writing into a
+# home directory follows whatever symlinks are there. sudo tormarchy menu add
+# goes to the person behind sudo, never to root's own home.
+want "menu edits run as the user, through runuser" tormarchy 'runuser -u "$user" -- env HOME="$home" "$SELF" menu "$verb"'
+want "and refuse to run as root for themselves" tormarchy 'die "run this as yourself, not as root"'
+# A file that does not parse already costs its owner every entry; one this made
+# unparseable would be worse. Checked before and after, and left alone if not.
+want "a file that does not parse is left alone" tormarchy 'does not parse as it is; fix it first, nothing was changed'
+want "and nothing is written that would not parse" tormarchy 'the menu would not parse after the change, so nothing was changed'
+want "uninstall takes the rows out" tormarchy 'menu_as_user "$SUDO_USER" remove'
+
+# The marketplace's security scan reads a script that downloads (curl) and also
+# runs an interpreter as one that may run what it fetched, and blocks it. A perl
+# one-liner to parse the menu file was enough to turn the verdict to
+# needs-fixes; sed -z does the same job without being an interpreter.
+for interpreter in perl python3 ruby node; do
+  if grep -qE "(^|[[:space:];|&(])$interpreter[[:space:]]" tormarchy; then
+    bad "tormarchy runs $interpreter, which the marketplace scan treats as running a download"
+  else
+    ok "tormarchy runs no $interpreter"
+  fi
+done
+
+echo
 echo "Panel copy"
 
 # Labels on the panel, never sentences: anything that explains or instructs is

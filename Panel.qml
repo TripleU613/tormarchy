@@ -504,6 +504,7 @@ Panel {
 
   Service {
     id: tor
+    bundledHelper: root.pluginDir + "/tormarchy"
     settings: root.settings
   }
 
@@ -787,6 +788,19 @@ Panel {
             Brief {
               full: tor.warnings.length > 0 ? String(tor.warnings[0]) : ""
               short: Model.briefWarning(full)
+            }
+
+            // This plugin's helper is newer than the installed one. Setup again
+            // is the only way it gets there, and it needs a terminal.
+            Button {
+              visible: tor.helperStale
+              text: qsTr("Update helper")
+              bordered: true
+              focusable: false
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              tooltipText: Model.wrapTip(qsTr("This plugin was updated, but the helper it runs was not. Updating runs setup again, once, in a terminal."))
+              onClicked: root.runSetup()
             }
 
             // Band 2 -- two paired surfaces of identical height and border:

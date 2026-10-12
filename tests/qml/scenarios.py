@@ -204,6 +204,30 @@ check(changes["path"] == 1 and changes["excludedExits"] == 1, "a changed one is"
 svc.deleteLater()
 
 print()
+print("Helper")
+
+svc = service(fixture("on"))
+svc.setProperty("bundledHelper", "/plugin/tormarchy")
+wait(120)
+check(svc.property("helperStale") is False, "a helper that matches the plugin's asks for nothing")
+check(any("cmp -s" in " ".join(a) and "/plugin/tormarchy" in a for a in stubs.COMMAND_LOG),
+      "it is compared with the helper this plugin ships")
+svc.deleteLater()
+os.environ["TORMARCHY_STUB_HELPER_STALE"] = "1"
+svc = service(fixture("on"))
+svc.setProperty("bundledHelper", "/plugin/tormarchy")
+wait(120)
+check(svc.property("helperStale") is True, "an installed helper older than the plugin is noticed")
+svc.deleteLater()
+os.environ["TORMARCHY_STUB_HELPER_STALE"] = "2"
+svc = service(fixture("on"))
+svc.setProperty("bundledHelper", "/plugin/tormarchy")
+wait(120)
+check(svc.property("helperStale") is False, "one that cannot be compared is not a reason to nag")
+svc.deleteLater()
+del os.environ["TORMARCHY_STUB_HELPER_STALE"]
+
+print()
 print("Bridges")
 
 BRIDGE_LINES = open(os.path.join(FIXTURES, "bridges.txt")).read()
