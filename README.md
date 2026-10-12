@@ -29,6 +29,11 @@ so the toggle doesn't ask for a password, your user added to the `tor` group,
 added to the Omarchy menu. It doesn't touch your Firefox or browser profiles —
 browser mode makes its own.
 
+The polkit rule covers only the commands that change routing — connect,
+disconnect, mode, exit, bridge, panic and the browser lock — each pinned by name.
+Anything else asks for your password, and nothing it covers runs a program you
+name.
+
 Run `setup` again after updating the plugin: the helper it installs is a copy,
 and only `setup` refreshes it. The panel shows **Update helper** when it's due.
 

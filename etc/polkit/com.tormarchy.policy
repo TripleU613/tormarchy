@@ -11,18 +11,21 @@
   symptom is a password prompt that no rule can suppress, with nothing logged
   to explain it. Use an em dash instead.
 
-  One action, not one per operation. There used to be six, pinned to six
-  program paths, and they bought nothing: every one of them was granted to the
-  same user by the same rule, so the only thing five extra actions added was
-  five more places to get this comment wrong.
+  One action per subcommand that needs root, each pinned to that subcommand as
+  the first argument with exec.argv1. pkexec picks the action whose path and
+  first argument both match; a subcommand with no action of its own matches
+  none of these and gets pkexec's generic action, which always asks for an
+  administrator's password and which 49-tormarchy.rules never grants.
 
-  Because the action pins a program path and not its arguments, granting it
-  grants every subcommand. The two that must not be reachable that way —
-  setup and uninstall — refuse to run under pkexec at all and require a real
-  terminal with sudo, which keeps this grant scoped to the runtime commands.
+  This used to be a single action pinned to the program path alone, and that
+  granted every subcommand. browser-exec was one of them, and it becomes
+  whatever program it is handed: any process running as the user who installed
+  this could take a root shell without a password. The list here is the list
+  in tormarchy's PKEXEC_COMMANDS, the dispatcher refuses anything else under
+  pkexec as well, and none of these runs a program its caller names.
 
   These defaults are the FALLBACK, not the normal path. 49-tormarchy.rules
-  grants this outright to the local, active user who ran setup, so that person
+  grants these outright to the local, active user who ran setup, so that person
   is never prompted. Everyone else — another account on the box, or anyone
   arriving over SSH — lands here and has to authenticate. auth_admin_keep
   rather than auth_admin so that, for those users, one prompt covers a short
@@ -32,15 +35,94 @@
   <vendor>Tormarchy</vendor>
   <vendor_url>https://github.com/TripleU613/tormarchy</vendor_url>
 
-  <action id="com.tormarchy.manage">
-    <description>Manage Tor routing</description>
-    <message>Authentication is required to change how this machine routes traffic through Tor</message>
+  <action id="com.tormarchy.connect">
+    <description>Route traffic through Tor</description>
+    <message>Authentication is required to route this machine's traffic through Tor</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/tormarchy</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">connect</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="com.tormarchy.disconnect">
+    <description>Stop routing traffic through Tor</description>
+    <message>Authentication is required to stop routing traffic through Tor</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/tormarchy</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">disconnect</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="com.tormarchy.mode">
+    <description>Change how traffic is routed through Tor</description>
+    <message>Authentication is required to change how traffic is routed through Tor</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/tormarchy</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">mode</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="com.tormarchy.exit">
+    <description>Choose Tor exit countries</description>
+    <message>Authentication is required to change which countries Tor exits from</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/tormarchy</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">exit</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="com.tormarchy.bridge">
+    <description>Change Tor bridges</description>
+    <message>Authentication is required to change the bridges Tor connects through</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/tormarchy</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">bridge</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="com.tormarchy.panic">
+    <description>Remove every Tormarchy firewall rule</description>
+    <message>Authentication is required to remove Tormarchy's firewall rules</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/tormarchy</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">panic</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="com.tormarchy.browser-lock">
+    <description>Lock a browser to Tor</description>
+    <message>Authentication is required to lock a browser to Tor</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/tormarchy</annotate>
+    <annotate key="org.freedesktop.policykit.exec.argv1">browser-lock</annotate>
     <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
   </action>
 </policyconfig>

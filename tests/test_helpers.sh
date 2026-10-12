@@ -342,6 +342,40 @@ is "browser-only checks the proxy itself rather than skipping routing" \
 unset -f curl timedatectl getent
 
 echo
+echo "The privilege boundary"
+
+# The real script, as pkexec would run it for the passwordless grant. Every
+# subcommand not on PKEXEC_COMMANDS must be refused before it does anything;
+# browser-exec once became whatever it was handed, as root.
+mapfile -t subcommands < <(sed -n '/^case "$command" in$/,/^esac$/p' tormarchy \
+  | sed -n 's/^\([a-z][a-z-]*\)\(  *| [a-z|-]*\)\{0,1\})[[:space:]].*/\1/p')
+(( ${#subcommands[@]} > 15 )) && ok "found the dispatcher's ${#subcommands[@]} subcommands" \
+  || bad "could not read the dispatcher's subcommands (${subcommands[*]})"
+refused_all=1
+for sub in "${subcommands[@]}"; do
+  [[ " ${PKEXEC_COMMANDS[*]} " == *" $sub "* ]] && continue
+  out=$(PKEXEC_UID=$(id -u) ./tormarchy "$sub" -- touch "$scratch/pwned-$sub" 2>&1)
+  if [[ $? == 0 || -e $scratch/pwned-$sub || $out != *"does not run as root through polkit"* ]]; then
+    bad "under pkexec, '$sub' was not refused: $out"; refused_all=0
+  fi
+done
+(( refused_all )) && ok "under pkexec, every subcommand that is not on the list is refused"
+out=$(PKEXEC_UID=$(id -u) ./tormarchy connect --dry-run lan 2>/dev/null)
+[[ $out == *"table inet tormarchy"* ]] && ok "one that is on it still runs" || bad "connect --dry-run was refused under pkexec"
+if (( EUID == 0 )); then
+  ./tormarchy browser-exec -- touch "$scratch/pwned-root" >/dev/null 2>&1
+  [[ ! -e $scratch/pwned-root ]] && ok "browser-exec run as root starts nothing" \
+    || bad "browser-exec ran its command as root"
+  out=$(./tormarchy browser firefox 2>&1)
+  [[ $out == *"not as root"* ]] && ok "a browser is never launched as root" || bad "a browser launch as root was not refused: $out"
+else
+  skip "browser-exec as root (needs root)"
+fi
+check=$(printf 'obfs4 192.0.2.1:443 AAAA cert=x \\\nobfs4 192.0.2.2:443 BBBB cert=y\001\n' | cmd_bridge check)
+is "a bridge line with a backslash or a control character is refused" \
+  "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["invalidLines"], d["count"])' "$check")" "2 0"
+
+echo
 echo "Status"
 
 TORRC_BASE="$scratch/torrc-base"; : >"$TORRC_BASE"

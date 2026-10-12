@@ -39,7 +39,14 @@ SELF=$(readlink -f "${BASH_SOURCE[0]}")
 # re-exec this exact invocation after escalating.
 ARGV=("$@")
 
+
 # ---------------------------------------------------------------- constants --
+# The subcommands that may run as root through polkit -- the passwordless grant
+# setup installs for the toggle -- and nothing else. etc/polkit/com.tormarchy.policy
+# has one action per entry here, each pinned to it as the first argument, and
+# the dispatcher refuses anything else under pkexec as well. Each takes only
+# validated values; none runs anything its caller names.
+PKEXEC_COMMANDS=(connect disconnect mode exit bridge panic browser-lock)
 
 TOR_USER="tor"
 TRANS_PORT=9040
@@ -1446,6 +1453,7 @@ normalize_bridge_lines() {
 bridge_counts() {
   awk -v addr="$BRIDGE_ADDRESS_RE" '
     /^[[:space:]]*(#|$)/ { next }
+    /[\\[:cntrl:]]/ { next }
     $1 ~ addr { n["plain"]++; next }
     $1 ~ /^[a-z0-9_]+$/ && $2 ~ addr { n[$1]++ }
     END { for (t in n) print t, n[t] }
@@ -1453,9 +1461,12 @@ bridge_counts() {
 }
 
 # Lines that are neither "<transport> <address:port> ..." nor a plain bridge.
+# A backslash or a control character makes any line invalid: each one becomes a
+# torrc line, and a trailing backslash would carry it onto the next.
 bridge_invalid_count() {
   awk -v addr="$BRIDGE_ADDRESS_RE" '
     /^[[:space:]]*(#|$)/ { next }
+    /[\\[:cntrl:]]/ { bad++; next }
     $1 ~ addr { next }
     $1 ~ /^[a-z0-9_]+$/ && $2 ~ addr { next }
     { bad++ }
@@ -1879,6 +1890,8 @@ cmd_browser() {
     return 0
   fi
 
+  # A browser run as root is a root process reading the web. Never.
+  (( EUID != 0 )) || die "launch the browser as yourself, not as root"
   command -v systemd-run >/dev/null 2>&1 || die "systemd-run is required for browser-only mode"
   tor_is_running || die "tor is not running; connect first (browser-only mode still needs the SOCKS proxy)"
 
@@ -1951,6 +1964,10 @@ cmd_browser() {
 # the lock cannot be put on, the browser is never started -- a Tor browser that
 # quietly is not one is the failure this exists to prevent.
 cmd_browser_exec() {
+  # The unprivileged half of a launch, and nothing else. Root is only ever asked
+  # for the lock, by browser-lock, and the browser runs as the person launching
+  # it. As root this would start whatever it was handed as root.
+  (( EUID != 0 )) || die "browser-exec never runs as root"
   [[ ${1:-} == -- ]] && shift
   (( $# > 0 )) || die "browser-exec: nothing to launch"
   "$SELF" browser-lock \
@@ -2508,8 +2525,8 @@ cmd_setup() {
   # polkitd what it knows rather than trusting the file copy.
   if command -v pkaction >/dev/null 2>&1; then
     registered=$(pkaction 2>/dev/null | grep -c '^com\.tormarchy\.')
-    (( registered >= 1 )) && echo "  $registered action registered" \
-      || echo "  WARNING: the action did not register; connecting will prompt for a password" >&2
+    (( registered == ${#PKEXEC_COMMANDS[@]} )) && echo "  $registered actions registered" \
+      || echo "  WARNING: $registered of ${#PKEXEC_COMMANDS[@]} actions registered; some commands will prompt for a password" >&2
   fi
 
   step "Verifying the tor config"
@@ -2706,6 +2723,14 @@ USAGE
 
 command="${1:-help}"
 shift || true
+
+# Through pkexec, only what is on the list, whatever polkit decided: the grant is
+# passwordless, so anything running as the user who installed this can reach it.
+# browser-exec, which becomes whatever program it is handed, once ran as root
+# this way -- a root shell for any process in that session, without a password.
+if [[ -n ${PKEXEC_UID:-} && " ${PKEXEC_COMMANDS[*]} " != *" $command "* ]]; then
+  die "that subcommand does not run as root through polkit"
+fi
 
 case "$command" in
 connect)    cmd_connect "$@" ;;

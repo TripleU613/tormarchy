@@ -40,9 +40,43 @@ echo "Privilege boundary"
 want "setup requires a terminal" tormarchy "require_terminal_root"
 want "the terminal check refuses pkexec" tormarchy 'PKEXEC_UID:-} ]] || die'
 
-# One action, one program path. More actions bought nothing and were five more
-# places to get an XML comment wrong.
-want "exactly one polkit action" etc/polkit/com.tormarchy.policy 'id="com.tormarchy.manage"'
+# The passwordless grant reaches only the subcommands that need root, never all
+# of them. One action per subcommand, pinned to it as the first argument; pkexec
+# skips an action whose argv1 does not match, and with no match at all falls
+# back to its generic action, which asks for a password and which the rule never
+# grants. An action pinned to the path with no argv1 matches every subcommand:
+# that was the whole hole, browser-exec handing out root shells.
+if python3 - <<'PY'
+import re, sys
+policy = open("etc/polkit/com.tormarchy.policy").read()
+script = open("tormarchy").read()
+allowed = re.search(r"^PKEXEC_COMMANDS=\(([^)]*)\)", script, re.M).group(1).split()
+actions = re.findall(r'<action id="([^"]+)">(.*?)</action>', policy, re.S)
+problems = []
+argv1s = []
+for action_id, body in actions:
+    path = re.search(r'exec\.path">([^<]*)<', body)
+    argv1 = re.search(r'exec\.argv1">([^<]*)<', body)
+    if not path or path.group(1) != "/usr/local/bin/tormarchy":
+        problems.append(f"{action_id}: not pinned to /usr/local/bin/tormarchy")
+    if not argv1:
+        problems.append(f"{action_id}: no exec.argv1, so it grants every subcommand")
+    else:
+        argv1s.append(argv1.group(1))
+if sorted(argv1s) != sorted(allowed):
+    problems.append(f"policy grants {sorted(argv1s)}, PKEXEC_COMMANDS lists {sorted(allowed)}")
+for forbidden in ("browser-exec", "browser", "setup", "uninstall", "boot", "menu"):
+    if forbidden in argv1s or forbidden in allowed:
+        problems.append(f"{forbidden} is reachable as root through polkit")
+if problems:
+    print("\n".join("    " + p for p in problems))
+    sys.exit(1)
+PY
+then ok "polkit grants exactly the subcommands that need root, each pinned by its first argument"
+else bad "the polkit grant reaches more than it should (above)"; fi
+want "the dispatcher refuses anything else under pkexec" tormarchy 'if [[ -n ${PKEXEC_UID:-} && " ${PKEXEC_COMMANDS[*]} " != *" $command "* ]]; then'
+want "browser-exec never runs as root" tormarchy '(( EUID != 0 )) || die "browser-exec never runs as root"'
+want "nor does a browser launch" tormarchy '(( EUID != 0 )) || die "launch the browser as yourself, not as root"'
 
 # A double hyphen inside an XML comment makes the whole document unparseable,
 # polkitd registers nothing, and pkexec falls back to prompting with no
