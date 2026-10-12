@@ -169,13 +169,13 @@ Nothing here edits your config. If you want them, paste them in.
 A key for the panel and one for the toggle, in `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER + CTRL + SHIFT + T", "Tor", { panel = "tripleu.tor" })
+o.bind("SUPER + CTRL + SHIFT + T", "Tor", "omarchy-shell tripleu.tor toggle")
 o.bind("SUPER + CTRL + SHIFT + O", "Toggle Tor", "omarchy-shell tripleu.tor toggleTor")
 ```
 
-The toggle is a plain command on purpose. Omarchy's `{ ipc = "..." }` shorthand
-splits its target at the first dot, and `tripleu.tor` has one, so it would call
-the wrong thing.
+Plain commands on purpose, since they work on every Omarchy 4. The `{ panel = … }`
+shorthand is newer than the 4.0 releases, and `{ ipc = "..." }` splits its
+target at the first dot, which `tripleu.tor` has.
 
 A Tor submenu in the Omarchy menu, inside the braces of
 `~/.config/omarchy/extensions/omarchy-menu.jsonc`:

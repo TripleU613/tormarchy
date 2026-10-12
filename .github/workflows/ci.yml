@@ -62,12 +62,20 @@ jobs:
 
       # The shell the widget is loaded into: Omarchy's own qs.Commons and qs.Ui,
       # at their current state rather than a copy that would go stale here.
-      - name: Fetch Omarchy
-        run: git clone -q --depth 1 https://github.com/basecamp/omarchy.git "$RUNNER_TEMP/omarchy"
+      # Both the latest release, which is what most machines run, and the
+      # development branch, which is what they run next: a widget written
+      # against one alone has failed to load on the other.
+      - name: Fetch Omarchy, released and in development
+        run: |
+          repo=https://github.com/basecamp/omarchy.git
+          release=$(git ls-remote --tags --refs --sort=-v:refname "$repo" 'v*' | head -1 | sed 's|.*refs/tags/||')
+          echo "latest release: $release"
+          git clone -q --depth 1 --branch "$release" "$repo" "$RUNNER_TEMP/omarchy-release"
+          git clone -q --depth 1 "$repo" "$RUNNER_TEMP/omarchy-dev"
 
       - name: Load the widget in every state
         env:
-          OMARCHY_PATH: ${{ runner.temp }}/omarchy
+          OMARCHY_PATH: ${{ runner.temp }}/omarchy-release ${{ runner.temp }}/omarchy-dev
           PYTHON: ${{ runner.temp }}/qt/bin/python
           QT_QPA_PLATFORM: offscreen
         run: .github/scripts/shell.sh

@@ -127,11 +127,12 @@ Window {
     Item { objectName: "cardContent"; anchors.fill: parent; anchors.margins: 14 }
   }
 
+  // Bar.qml's ModuleSlot: as wide and as tall as the widget says it is.
   Item {
     objectName: "slot"
     x: %(slotx)s
     y: %(sloty)s
-    height: 26
+    height: loader.item ? loader.item.implicitHeight : 0
     width: loader.item ? loader.item.implicitWidth : 0
 
     Loader {
@@ -225,11 +226,45 @@ def finish():
         app.exit(2)
 
 
+def icon_off_centre():
+    """How far the bar mark's layers sit from the slot's centre, and from each
+    other. The mark is concentric rings, so any drift between layers is the
+    lopsided icon itself, whatever the shell does with the whole."""
+    from PySide6.QtCore import QPointF
+    slot = win.findChild(QObject, "slot")
+    if slot is None or slot.width() <= 0:
+        return None
+    centre = slot.mapToScene(QPointF(slot.width() / 2, slot.height() / 2))
+    for icon in slot.findChildren(QObject):
+        if not icon.metaObject().className().startswith("TorIcon"):
+            continue
+        offsets = []
+        for layer in icon.childItems():
+            if layer.width() <= 0:
+                continue
+            c = layer.mapToScene(QPointF(layer.width() / 2, layer.height() / 2))
+            offsets.append((c.x() - centre.x(), c.y() - centre.y()))
+        if not offsets:
+            return None
+        spread = max(max(abs(a[0] - b[0]), abs(a[1] - b[1])) for a in offsets for b in offsets)
+        worst = max(max(abs(x), abs(y)) for x, y in offsets)
+        return worst, spread
+    return None
+
+
 def report():
     global failed
     if not failed and win.property("widget") is None:
         print("FAIL  Panel.qml compiled but did not instantiate")
         failed = True
+    measured = icon_off_centre() if not failed else None
+    if measured is not None:
+        worst, spread = measured
+        # Half a pixel is the shell's own: an even canvas in an odd slot puts
+        # every icon on the bar there, glyphs included.
+        if worst > 0.75 or spread > 0.01:
+            print(f"FAIL  the bar mark is off centre by {worst:.2f}px, its layers {spread:.2f}px apart")
+            failed = True
     if args.bar or args.panel:
         image = win.grabWindow()
         if args.panel:

@@ -221,10 +221,17 @@ bare=$(awk '
 ' ./*.qml)
 if [[ -z $bare ]]; then ok "no bare Color. in any QML file"; else bad "bare Color. (use Commons.Color):"; printf '        %s\n' "$bare"; fi
 
-# ShellIpc, as every first-party panel uses, so omarchy-shell can reach the
-# handler over the shell's own socket.
-want "the panel's IPC goes through ShellIpc" Panel.qml "ShellIpc {"
-reject "no bare IpcHandler in the panel" Panel.qml "IpcHandler {"
+# Quickshell's IpcHandler, never Omarchy's ShellIpc. ShellIpc is newer than the
+# latest Omarchy release, and a widget naming a type its shell lacks is left out
+# of the bar without a word -- which is what 1.2.0 did on every released shell.
+want "the panel's IPC is a plain IpcHandler" Panel.qml "IpcHandler {"
+reject "no ShellIpc, which released Omarchy does not have" Panel.qml "ShellIpc {"
+
+# The bar mark centres every layer on the box it is given. Omarchy 4.0.x
+# stretches a custom icon over its whole canvas, and layers placed against
+# their own size drifted into the top-left corner of the stretched box.
+reject "no layer of the mark is placed against its own size" TorIcon.qml "(root.size - width) / 2"
+want "the size falls back where the shell has no bar icon size" Panel.qml "Style.bar.iconSize || "
 
 # A third-party plugin's shell facade only summons the plugin's own id. The
 # speed test summon was always refused, after closing the panel first.

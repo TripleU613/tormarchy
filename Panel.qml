@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import Quickshell.Io
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
@@ -400,10 +401,12 @@ Panel {
     function onModeChanged() { root.ensureCursor() }
   }
 
-  // ShellIpc rather than a bare IpcHandler: it also registers with the shell's
-  // own socket, so `omarchy-shell tripleu.tor toggle` reaches it without
-  // starting a qs ipc client, the same as every first-party panel.
-  ShellIpc {
+  // Quickshell's own IpcHandler, not Omarchy's ShellIpc. ShellIpc is newer than
+  // Omarchy 4.0.4, the release most machines run, and a widget naming a type
+  // its shell lacks fails to load and is left out of the bar without a word.
+  // omarchy-shell reaches an IpcHandler on every version: through qs ipc on
+  // 4.0.x, and on later shells by falling back to qs ipc after its own socket.
+  IpcHandler {
     target: root.ipcTarget
     function open(): void { root.open() }
     function close(): void { root.close() }
@@ -446,13 +449,13 @@ Panel {
     // panel is one click away for anything more specific. The tooltip says it
     // in words for anyone who has not learned the icon yet.
     tooltipText: tor.statusText
-    // No position of its own. BarIconContent measures what the mark paints,
-    // scales it to the bar's icon size and centres it on the slot, exactly as
-    // it does every first-party glyph -- placing it here as well only fought
-    // that, and lost.
+    // No position of its own: the mark centres itself on whatever box the
+    // shell gives it (see TorIcon). The size is the bar's icon size where the
+    // shell has one; Omarchy 4.0.x has only the 16px canvas its glyphs are
+    // drawn about 12px inside, so it gets the same three quarters.
     iconComponent: Component {
       TorIcon {
-        iconSize: Style.bar.iconSize
+        iconSize: Style.bar.iconSize || Math.round((Style.bar.iconCanvas || 16) * 0.75)
         color: root.barIconColor
         layerOpacity: root.barLayerOpacity
         coreVisible: root.barRouted || root.barBrowserOnly || root.barBlocked || root.barConnecting

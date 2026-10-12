@@ -37,22 +37,38 @@ Item {
 
   // Whole pixels: a fractional box gets centred onto a half pixel, which
   // antialiases into a soft mark.
-  readonly property real size: Math.max(6, Math.round(iconSize))
+  readonly property int size: Math.max(6, Math.round(iconSize))
 
-  // Proportions chosen at the 12px bar size, where every layer and every gap
-  // has to stay at least a pixel wide or the rings run together.
-  readonly property real skin: Math.max(1, size * 0.12)
-  readonly property real layerSize: size * 0.58
-  readonly property real layerStroke: Math.max(1, size * 0.1)
-  readonly property real coreSize: Math.max(2, size * 0.22)
+  // Whole pixels throughout, each layer the same parity as the mark, so every
+  // edge lands on the pixel grid and every layer centres exactly: at 12px that
+  // is a 1px skin, a 1px gap, an 8px layer, another 1px gap and a 4px core. A
+  // fractional size centred in a whole one sits half a pixel off and blurs.
+  function evenWith(value, reference) {
+    var n = Math.round(value)
+    if (n % 2 === reference % 2) return n
+    return value > n ? n + 1 : n - 1
+  }
+  readonly property int skin: Math.max(1, Math.round(size * 0.1))
+  readonly property int layerSize: evenWith(size * 0.62, size)
+  readonly property int layerStroke: Math.max(1, Math.round(size * 0.1))
+  readonly property int coreSize: Math.max(2, evenWith(size * 0.3, size))
 
   width: size
   height: size
   implicitWidth: size
   implicitHeight: size
 
+  // Every layer centres on the box this item is actually given, never on
+  // `size`. Omarchy 4.0.x stretches a custom bar icon over its whole icon
+  // canvas, wider than the mark; later shells keep the declared size and
+  // centre what is painted. Layers placed against `size` drifted up and to the
+  // left inside the stretched box, which is what put the mark off centre in
+  // the bar. Centred on the box, it is right under both.
   Rectangle {
-    anchors.fill: parent
+    x: (root.width - width) / 2
+    y: (root.height - height) / 2
+    width: root.size
+    height: width
     radius: width / 2
     color: "transparent"
     border.width: root.skin
@@ -62,8 +78,8 @@ Item {
   }
 
   Rectangle {
-    x: (root.size - width) / 2
-    y: (root.size - height) / 2
+    x: (root.width - width) / 2
+    y: (root.height - height) / 2
     width: root.layerSize
     height: width
     radius: width / 2
@@ -76,8 +92,8 @@ Item {
 
   Rectangle {
     id: core
-    x: (root.size - width) / 2
-    y: (root.size - height) / 2
+    x: (root.width - width) / 2
+    y: (root.height - height) / 2
     width: root.coreSize
     height: width
     radius: width / 2
