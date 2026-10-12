@@ -1,0 +1,17 @@
+{
+ "installed": true,
+ "torRunning": true,
+ "connected": false,
+ "bootstrap": 45,
+ "mode": "lan",
+ "exitIp": "",
+ "exitCountry": "",
+ "requestedExit": "",
+ "circuitAgeSec": 0,
+ "path": [],
+ "bytesRead": 120000,
+ "bytesWritten": 40000,
+ "statusText": "Bootstrapping at 45%",
+ "warnings": [],
+ "controlPort": true
+}

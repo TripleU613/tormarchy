@@ -47,13 +47,19 @@ also drop the `tor` package and your group membership.
 | **Standard** | Everything through Tor, but printers, SSH and Syncthing still work. |
 | **Browser only** | Nothing system-wide. Launches a browser that can't reach anything except Tor. |
 
-Maximum and Standard also switch off IPv6 and refuse to forward traffic, so a VM
-or container can't route around the rules.
+Maximum and Standard also switch off IPv6 (loopback excepted, so things on `::1`
+keep working) and refuse to forward traffic, so a VM or container can't route
+around the rules. Disconnecting puts IPv6 back exactly as it was, interface by
+interface.
 
 Browser only doesn't just set a proxy preference — a proxy setting is a request
-that WebRTC and QUIC happily ignore. It runs the browser under
-`IPAddressDeny=any`, so the kernel won't let it open a socket to anything but
-loopback. Works with any browser you have installed.
+that WebRTC and QUIC happily ignore. `tormarchy browser` starts the browser in a
+systemd scope of its own and, before the browser runs, adds a firewall rule for
+that scope: loopback only, so the SOCKS proxy and nothing else. If the rule can't
+go on, the browser doesn't start. Each launch is its own instance with its own
+profile, so it never hands the window to a copy of the browser you already had
+open. Firefox, Chromium-family browsers and qutebrowser are covered; anything
+else gets the proxy variables and has to be closed first.
 
 ## What it costs
 
@@ -78,26 +84,37 @@ logged in.
 
 
 
-Left click opens it, right click toggles, middle click gets a new circuit.
+Left click opens it, right click toggles, middle click gets a new circuit. Hover
+it for the status in words.
 
 Inside: `j`/`k` to move, `t` toggle, `n` new circuit, `e` exit country,
-`s` measure latency, `esc` to close.
+`s` measure latency, `r` refresh, `esc` to close.
 
-The onion only lights up once traffic is actually going through Tor. In browser
-only the switch follows Tor itself, since that mode routes nothing system-wide --
-so it reads on while the onion stays dark.
+The onion in the bar says where you are:
+
+| | |
+|---|---|
+| Rings and core lit | Everything is going through Tor. |
+| Core pulsing | Connecting. Nothing is routed until Tor has fully bootstrapped. |
+| Core lit, rings dim | Browser only, with Tor up. The rest of the machine isn't routed. |
+| Rings only, dim | Off. |
+| Red | Tor stopped while you were connected, so the kill switch is holding the network shut. Turn it off to get it back. |
+
+The switch can be turned off while it's still connecting, which cancels the
+connection.
 
 ## Commands
 
 | | |
 |---|---|
 | `tormarchy connect` / `disconnect` | On and off. `--dry-run` prints the firewall rules without applying them. |
+| `tormarchy mode strict` | Switch mode. Stays on if it was on. |
 | `tormarchy status` | What's happening. |
 | `tormarchy ip` | Your circuit and exit, straight from Tor. Doesn't phone anyone to ask. |
 | `tormarchy newnym` | New circuit. |
 | `tormarchy exit de` | Leave from Germany. `--list` shows what's available. |
 | `tormarchy bridge` | For networks that block Tor. |
-| `tormarchy browser` | Launch a browser locked to Tor. |
+| `tormarchy browser` | Launch a browser the firewall locks to Tor. `--list` shows what it found. |
 | `tormarchy doctor` | Check for leaks. |
 | `tormarchy boot enable` | Reconnect at boot if Tor was on when you shut down. Off by default. |
 | `tormarchy panic` | Rip out every rule. For when things go wrong. |
@@ -114,8 +131,9 @@ Nothing survives a reboot, so restarting always gets your network back.
 
 That's also why `tormarchy boot enable` is opt-in rather than the default —
 turning it on trades a little of that guarantee for not having to reconnect
-after every restart. It only reconnects if Tor was on when you shut down, and if
-the network isn't there or Tor can't bootstrap it applies no rules at all.
+after every restart. It only reconnects if Tor was on when you shut down, comes
+back in the mode you were using, and if the network isn't there or Tor can't
+bootstrap it applies no rules at all.
 
 ## License
 

@@ -81,6 +81,13 @@ is(good.exitCountryName, "Germany", "exit country name is derived, not trusted")
 is(good.path.join(","), "it,nl,de", "path survives parsing");
 is(formatAge(90), "1m 30s", "age formats as minutes and seconds");
 
+// The control port's reachability. Without it the bootstrap figure is a
+// placeholder, and an older helper that never sent the field only ever reported
+// a reachable port.
+is(good.controlPort, true, "an older status with no controlPort field reads as reachable");
+is(parseStatus(JSON.stringify({ installed: true, torRunning: true, controlPort: false })).controlPort,
+  false, "an unreachable control port is carried through");
+
 console.log(failures === 0
   ? "  ok    Model.js behaves"
   : `  ${failures} assertion(s) failed`);

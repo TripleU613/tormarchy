@@ -333,10 +333,25 @@ group "Pinned decisions"
 # firewall, pinned at the source level instead.
 bash tests/test_decisions.sh || failures=$(( failures + 1 ))
 
+group "Helpers"
+
+# The script's own logic with the machine stubbed out: IPv6 save and restore,
+# the boot marker, circuit selection, the status JSON. The IPv6 cases need root
+# and skip themselves without it; CI runs this under sudo.
+bash tests/test_helpers.sh || failures=$(( failures + 1 ))
+
+group "Model"
+
+if command -v node >/dev/null 2>&1; then
+  node tests/test_model.js || failures=$(( failures + 1 ))
+else
+  note "node not installed, skipping Model.js tests"
+fi
+
 group "Commands"
 
 missing=""
-for sub in help status ip newnym exit bridge browser speed doctor panic connect disconnect mode setup uninstall pingd; do
+for sub in help status ip newnym exit bridge browser browser-exec browser-lock speed doctor panic connect disconnect mode setup uninstall pingd boot; do
   # The pattern allows "status)" and "help | -h | --help)" alike.
   grep -qE "^${sub}[)| ]" tormarchy || missing+=" $sub"
 done

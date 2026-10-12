@@ -1,76 +1,103 @@
 import QtQuick
-import QtQuick.Shapes
 import qs.Commons
+import qs.Commons as Commons
 
-// The Tor mark, taken from the Tor Browser "Stable" icon and rendered as a
-// single monochrome path.
+// The onion, as concentric layers: an outer skin, an inner layer, and a core.
 //
-// The source SVG is three stacked layers: a lavender disc, this path filled
-// with a purple gradient, and a mirrored half-disc with a drop shadow. None of
-// that survives here on purpose -- a bar glyph has to be one flat colour that
-// follows the theme. So only path#center is kept, and it takes `color`.
+// This replaced a monochrome copy of the Tor Browser artwork, which was the
+// wrong shape for a bar. That artwork is a solid disc with ring bands cut out
+// of its right half only -- its mirrored half is a separate, lighter layer in
+// the original -- so flattened to one colour at 12px it rendered as a solid
+// left half beside a smudge of rings: a moon, leaning left. The host centres a
+// bar icon by its painted bounds, so no amount of nudging could fix an
+// imbalance that lives inside the shape. A symmetric mark has none.
 //
-// Drawn with Shapes rather than loaded as an Image: an Image would need a
-// colour-overlay effect to be themeable at all, and would resample a 512px
-// canvas down to ~13px. A path scales to whatever size is asked for.
+// Built from Rectangles, not a Shape path. BarIconContent measures what an icon
+// paints to scale and centre it, and a Rectangle's bounds are exact and
+// immediate, where a Shape's depend on the renderer having processed the path.
 //
-// The geometry is even-odd, and that is load-bearing: the outer subpath is the
-// full disc and the ring bands are cut out of it. Filling this non-zero paints
-// a solid blob with no onion in it.
+// The core carries the state, so it reads by shape as well as by colour --
+// which also keeps it legible on light themes, where a dimmed glyph and a lit
+// one can be closer in colour than a dark theme suggests:
+//
+//   filled core    traffic is going through Tor
+//   pulsing core   Tor is bootstrapping
+//   no core        off
 Item {
   id: root
 
   property real iconSize: Style.font.icon
-  property color color: Color.foreground
+  property color color: Commons.Color.foreground
 
-  // Whole pixels, for the same reason TorWordmark rounds its blocks. Style.space()
-  // is theme-scaled, so the bar's Style.space(13) arrives as 15.99 rather than 16 --
-  // and a glyph whose own box is 15.99 wide gets centred onto a half pixel, which
-  // antialiases into a soft mark sitting visibly off to one side at bar size.
-  readonly property real pixelSize: Math.max(1, Math.round(iconSize))
+  // Opacity of the two outer layers. The bar dims them while the system as a
+  // whole is not routed through Tor, including browser-only with Tor up.
+  property real layerOpacity: 1.0
+  property bool coreVisible: true
+  property bool pulsing: false
 
-  // The source artwork's canvas. Every coordinate below is in these units.
-  readonly property real sourceSize: 512
+  // Whole pixels: a fractional box gets centred onto a half pixel, which
+  // antialiases into a soft mark.
+  readonly property real size: Math.max(6, Math.round(iconSize))
 
-  // The mark's bounding box is a full disc, so it centres perfectly by geometry
-  // and still looks pushed to the left. That is because the ring bands are cut
-  // out of the right half only -- the mirrored half of the original artwork is
-  // deliberately not drawn here -- so the solid left half carries more of the
-  // ink. Measured against the shipped path, the filled area's centroid sits
-  // 19.2 of these units left of the canvas centre: 3.75% of the width, which is
-  // 0.6px of visible lean on the 16px bar glyph.
-  //
-  // So the artwork is nudged back by exactly that, which is what optical
-  // centring means for an asymmetric mark. Set to 0 to centre it by geometry.
-  property real opticalShift: sourceSize * 0.0375
+  // Proportions chosen at the 12px bar size, where every layer and every gap
+  // has to stay at least a pixel wide or the rings run together.
+  readonly property real skin: Math.max(1, size * 0.12)
+  readonly property real layerSize: size * 0.58
+  readonly property real layerStroke: Math.max(1, size * 0.1)
+  readonly property real coreSize: Math.max(2, size * 0.22)
 
-  width: pixelSize
-  height: pixelSize
-  implicitWidth: pixelSize
-  implicitHeight: pixelSize
+  width: size
+  height: size
+  implicitWidth: size
+  implicitHeight: size
 
-  Item {
-    // Applied in source units and scaled with everything else, so the correction
-    // stays proportional at every size the mark is drawn at.
-    x: root.opticalShift * root.pixelSize / root.sourceSize
-    width: root.sourceSize
-    height: root.sourceSize
-    transformOrigin: Item.TopLeft
-    scale: root.pixelSize / root.sourceSize
+  Rectangle {
+    anchors.fill: parent
+    radius: width / 2
+    color: "transparent"
+    border.width: root.skin
+    border.color: root.color
+    opacity: root.layerOpacity
+    antialiasing: true
+  }
 
-    Shape {
-      anchors.fill: parent
-      antialiasing: true
-      preferredRendererType: Shape.CurveRenderer
+  Rectangle {
+    x: (root.size - width) / 2
+    y: (root.size - height) / 2
+    width: root.layerSize
+    height: width
+    radius: width / 2
+    color: "transparent"
+    border.width: root.layerStroke
+    border.color: root.color
+    opacity: root.layerOpacity
+    antialiasing: true
+  }
 
-      ShapePath {
-        fillColor: root.color
-        strokeWidth: 0
-        strokeColor: "transparent"
-        fillRule: ShapePath.OddEvenFill
+  Rectangle {
+    id: core
+    x: (root.size - width) / 2
+    y: (root.size - height) / 2
+    width: root.coreSize
+    height: width
+    radius: width / 2
+    color: root.color
+    antialiasing: true
+    // Hidden by opacity rather than `visible`, so the painted bounds the bar
+    // centres on stay the same in every state and the mark never shifts.
+    opacity: !root.coreVisible ? 0 : (root.pulsing ? pulse.level : 1)
 
-        PathSvg { path: "M256.525143,465.439707 L256.525143,434.406609 C354.826191,434.122748 434.420802,354.364917 434.420802,255.992903 C434.420802,157.627987 354.826191,77.8701558 256.525143,77.5862948 L256.525143,46.5531962 C371.964296,46.8441537 465.446804,140.489882 465.446804,255.992903 C465.446804,371.503022 371.964296,465.155846 256.525143,465.439707 Z M256.525143,356.820314 C311.970283,356.529356 356.8487,311.516106 356.8487,255.992903 C356.8487,200.476798 311.970283,155.463547 256.525143,155.17259 L256.525143,124.146588 C329.115485,124.430449 387.881799,183.338693 387.881799,255.992903 C387.881799,328.654211 329.115485,387.562455 256.525143,387.846316 L256.525143,356.820314 Z M256.525143,201.718689 C286.266674,202.00255 310.3026,226.180407 310.3026,255.992903 C310.3026,285.812497 286.266674,309.990353 256.525143,310.274214 L256.525143,201.718689 Z M0,255.992903 C0,397.384044 114.60886,512 256,512 C397.384044,512 512,397.384044 512,255.992903 C512,114.60886 397.384044,0 256,0 C114.60886,0 0,114.60886 0,255.992903 Z" }
-      }
+    QtObject {
+      id: pulse
+      property real level: 1
+    }
+
+    SequentialAnimation {
+      running: root.pulsing && root.coreVisible
+      loops: Animation.Infinite
+      onRunningChanged: if (!running) pulse.level = 1
+      NumberAnimation { target: pulse; property: "level"; from: 1; to: 0.25; duration: 650; easing.type: Easing.InOutSine }
+      NumberAnimation { target: pulse; property: "level"; from: 0.25; to: 1; duration: 650; easing.type: Easing.InOutSine }
     }
   }
 }

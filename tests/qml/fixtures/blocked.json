@@ -1,0 +1,19 @@
+{
+ "installed": true,
+ "torRunning": false,
+ "connected": true,
+ "bootstrap": 0,
+ "mode": "strict",
+ "exitIp": "",
+ "exitCountry": "",
+ "requestedExit": "",
+ "circuitAgeSec": 0,
+ "path": [],
+ "bytesRead": 0,
+ "bytesWritten": 0,
+ "statusText": "Kill switch holding: tor is not running, so the network is blocked",
+ "warnings": [
+  "Tor has stopped, so the kill switch is holding the network shut. Turn Tormarchy off to get it back."
+ ],
+ "controlPort": false
+}

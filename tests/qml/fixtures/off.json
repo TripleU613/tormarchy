@@ -1,0 +1,17 @@
+{
+ "installed": true,
+ "torRunning": false,
+ "connected": false,
+ "bootstrap": 0,
+ "mode": "lan",
+ "exitIp": "",
+ "exitCountry": "",
+ "requestedExit": "",
+ "circuitAgeSec": 0,
+ "path": [],
+ "bytesRead": 0,
+ "bytesWritten": 0,
+ "statusText": "Disconnected",
+ "warnings": [],
+ "controlPort": false
+}

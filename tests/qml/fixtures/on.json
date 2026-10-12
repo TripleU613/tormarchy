@@ -1,0 +1,21 @@
+{
+ "installed": true,
+ "torRunning": true,
+ "connected": true,
+ "bootstrap": 100,
+ "mode": "lan",
+ "exitIp": "185.220.101.4",
+ "exitCountry": "de",
+ "requestedExit": "",
+ "circuitAgeSec": 312,
+ "path": [
+  "fr",
+  "nl",
+  "de"
+ ],
+ "bytesRead": 48213990,
+ "bytesWritten": 3311200,
+ "statusText": "All traffic through Tor via DE",
+ "warnings": [],
+ "controlPort": true
+}

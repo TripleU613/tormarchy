@@ -17,11 +17,19 @@ failures=0
 ok()   { printf '  \033[32mok\033[0m    %s\n' "$1"; }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; failures=$(( failures + 1 )); }
 
+# The -- matters: a pinned string can itself start with a dash, a command-line
+# flag for instance, and grep would otherwise take it for one of its own.
 want() {          # want <description> <file> <fixed-string>
-  if grep -Fq "$3" "$2"; then ok "$1"; else bad "$1 (missing in $2: $3)"; fi
+  if grep -Fq -- "$3" "$2"; then ok "$1"; else bad "$1 (missing in $2: $3)"; fi
 }
 reject() {        # reject <description> <file> <fixed-string>
-  if grep -Fq "$3" "$2"; then bad "$1 (found in $2: $3)"; else ok "$1"; fi
+  if grep -Fq -- "$3" "$2"; then bad "$1 (found in $2: $3)"; else ok "$1"; fi
+}
+# For order, which a single fixed string cannot pin: grep -F given two lines
+# matches either of them on its own.
+want_next() {     # want_next <description> <file> <line> <the line after it>
+  if awk -v a="$3" -v b="$4" 'hit && index($0, b) { found = 1; exit } { hit = index($0, a) > 0 } END { exit !found }' "$2"
+  then ok "$1"; else bad "$1 (in $2, '$4' does not follow '$3')"; fi
 }
 
 echo "Privilege boundary"
@@ -186,6 +194,73 @@ want "stale status reads are dropped" Service.qml "root._statusEpoch !== root._a
 # The toggle's busy state is action-only. Folding the routine status poll in made
 # the switch flash and refuse clicks on every refresh.
 want "busy tracks actions, not the status poll" Service.qml "readonly property bool busy: actionProcess.running"
+
+# A connect waits up to two minutes for bootstrap, and the switch used to refuse
+# every click for all of it. Switching off during that wait cancels instead.
+want "a pending connect can be cancelled from the switch" Service.qml "readonly property bool canToggle"
+want "the panel gates the switch on canToggle, not busy" Panel.qml "tor.installed && tor.canToggle"
+want "connect stops waiting when tor goes away" tormarchy "tor_is_running || break"
+want_next "connect re-checks tor under the lock before applying" tormarchy \
+  "cancelled_unless_running" 'apply_rules "$mode" || die'
+
+
+# The live stream keeps one connection open, and a connection stays on the
+# circuit it was opened on. Without a restart, "New circuit" left the gauge
+# timing the circuit that had just been abandoned.
+want "the latency stream restarts across a new circuit" Service.qml "!root._pingHeld"
+
+echo
+echo "Loading in the shell"
+
+# Qt 6.12 ships a Color type of its own. A bare `Color.x` resolves to it, comes
+# back undefined, and a colour given undefined falls back to black -- the
+# switch's "on" track went black on a dark bar. Qualified everywhere.
+bare=$(awk '
+  { line = $0; sub(/\/\/.*/, "", line) }
+  line ~ /(^|[^.A-Za-z_])Color\.[a-z]/ { print FILENAME ":" FNR ": " $0 }
+' ./*.qml)
+if [[ -z $bare ]]; then ok "no bare Color. in any QML file"; else bad "bare Color. (use Commons.Color):"; printf '        %s\n' "$bare"; fi
+
+# ShellIpc, as every first-party panel uses, so omarchy-shell can reach the
+# handler over the shell's own socket.
+want "the panel's IPC goes through ShellIpc" Panel.qml "ShellIpc {"
+reject "no bare IpcHandler in the panel" Panel.qml "IpcHandler {"
+
+# A third-party plugin's shell facade only summons the plugin's own id. The
+# speed test summon was always refused, after closing the panel first.
+reject "no summon of another plugin's panel" Panel.qml 'summon("omarchy.'
+
+echo
+echo "Escapes and disconnections"
+
+# IPAddressDeny on a --user scope is a BPF program a user manager cannot load.
+# systemd logs it and carries on without it, so the "locked to Tor" browser was
+# not locked at all. The lock is an nftables rule on the scope's cgroup instead.
+reject "browser-only does not rely on IPAddressDeny" tormarchy "--property=IPAddressDeny"
+want "browser-only is locked by cgroup in nftables" tormarchy 'socket cgroupv2 level'
+want "the browser is not started if the lock fails" tormarchy 'could not lock the browser to Tor, so it was not started'
+# A running Chromium handed a new window opens it in the existing, unproxied
+# process. Its own profile forces an instance of its own.
+want "chromium gets an instance of its own" tormarchy '--user-data-dir=$data/chromium-$name'
+want "qutebrowser gets an instance of its own" tormarchy '--basedir "$data/qutebrowser"'
+
+# The boot marker held nothing, so boot reconnected in lan whatever the user had
+# chosen: Maximum came back as Standard after every reboot.
+want "the boot marker records the mode" tormarchy 'remember_connected "$mode"'
+want "connect falls back to the remembered mode" tormarchy 'mode=$(remembered_mode)'
+
+# The bridge fallback wrote bridge lines and never restarted tor, so it could
+# not have worked.
+want_next "the bridge fallback restarts tor onto the bridges" tormarchy \
+  'bridge_activate "$BRIDGE_STASH" >/dev/null 2>&1; then' "bridge_reload"
+
+# The published cookie copy was preferred by the very lookup meant to refresh it,
+# so after any tor restart the control port stayed dark.
+want "publishing reads tor's own cookie" tormarchy 'for candidate in "${TOR_COOKIES[@]}"; do'
+
+# Loopback v6 stays up, and the pre-connect state is saved once only.
+want "loopback IPv6 stays up while connected" tormarchy "printf '0' >\"\$IPV6_CONF/lo/disable_ipv6\""
+want "the IPv6 state is saved once per connection" tormarchy 'if [[ ! -e $IPV6_STATE_FILE ]]; then'
 
 echo
 if (( failures == 0 )); then
