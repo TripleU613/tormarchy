@@ -81,6 +81,12 @@ want "forward traffic is dropped" tormarchy "hook forward priority filter; polic
 want "invalid conntrack state is dropped" tormarchy "ct state invalid drop"
 want "IPv6 is dropped explicitly" tormarchy "meta nfproto ipv6 drop"
 
+# Switching on moves the machine only onto a route already proven to carry
+# traffic. Without it the switch lands on circuits still being built, and
+# everything on the machine waits on them: the big drop.
+if awk '/^cmd_connect\(\) \{/ { inside = 1 } inside && /find_route \|\|/ { found = NR } inside && /apply_rules "\$mode"/ { applied = NR } inside && /^}/ { exit } END { exit !(found && applied && found < applied) }' tormarchy
+then ok "connect proves a route before any rule goes on"; else bad "connect applies rules without proving a route first"; fi
+
 # Rules go on only after a full bootstrap. Applying them earlier redirects
 # everything into a daemon that cannot carry it, which looks exactly like a dead
 # network.

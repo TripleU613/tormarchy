@@ -28,7 +28,7 @@ jobs:
           sudo apt-get update -qq
           # shellcheck lints the dispatcher, libxml2-utils provides xmllint for
           # the polkit policy and the logo, nftables validates the real ruleset.
-          sudo apt-get install -y -qq shellcheck libxml2-utils nftables
+          sudo apt-get install -y -qq shellcheck libxml2-utils nftables iproute2
 
           # The ruleset exempts tor's own traffic with `meta skuid "tor"`, and
           # nft resolves usernames when it parses the file rather than when it

@@ -318,6 +318,19 @@ else
   done
 fi
 
+# The rules in a real kernel, between two network namespaces: nothing reaches
+# the wire once they are on, and what was open before fails at once instead of
+# hanging. Root and namespaces only; a restricted container skips it.
+group "Kill switch, in a real kernel"
+for mode in strict lan; do
+  tests/kernel/killswitch.sh "/tmp/ruleset-$mode.nft" >"/tmp/killswitch-$mode.log" 2>&1
+  case $? in
+  0) pass "$mode: nothing leaves, and open connections fail at once" ;;
+  2) note "$mode: needs root and network namespaces, skipping" ;;
+  *) cat "/tmp/killswitch-$mode.log"; fail "$mode: the kill switch let something out, or left an app hanging" ;;
+  esac
+done
+
 # --------------------------------------------------------------------- shape --
 
 group "Name collisions"

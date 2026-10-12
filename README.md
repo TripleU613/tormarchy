@@ -97,7 +97,7 @@ The onion in the bar says where you are:
 | | |
 |---|---|
 | Rings and core lit | Everything is going through Tor. |
-| Core pulsing | Connecting. Nothing is routed until Tor has fully bootstrapped. |
+| Core pulsing | Connecting. Nothing moves until Tor has bootstrapped and a real request has made it through, so switching on is a blip, not a drop. |
 | Core lit, rings dim | Browser only, with Tor up. The rest of the machine isn't routed. |
 | Rings only, dim | Off. |
 | Red | Tor stopped while you were connected, so the kill switch is holding the network shut. Turn it off to get it back. |

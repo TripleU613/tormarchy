@@ -151,6 +151,77 @@ is "a v2 line for the same circuit is served from the cache" "$ccs|${relays%%,*}
 runtime_dir() { return 1; }
 
 echo
+echo "Finding a route"
+
+# A resolver on a free local port standing in for tor's DNSPort: it answers
+# each query under the query's own id, with the rcode it is told to.
+dns_port=$(python3 -c 'import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+printf '0' >"$scratch/rcode"
+python3 - "$dns_port" "$scratch/rcode" <<'PY' &
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("127.0.0.1", int(sys.argv[1])))
+while True:
+    q, addr = s.recvfrom(512)
+    rcode = int(open(sys.argv[2]).read() or 0)
+    if rcode < 0:
+        continue                      # silence: a resolver that never answers
+    s.sendto(q[:2] + bytes([0x81, 0x80 | rcode]) + q[4:], addr)
+PY
+resolver=$!
+sleep 0.5
+DNS_PORT=$dns_port
+ROUTE_PROBE_TIMEOUT=2
+dns_probe && ok "a lookup through tor's resolver is understood" || bad "a NOERROR answer was not accepted"
+printf '2' >"$scratch/rcode"
+dns_probe && bad "a SERVFAIL was taken for an answer" || ok "a resolver that fails is not a route"
+printf -- '-1' >"$scratch/rcode"
+dns_probe && bad "silence was taken for an answer" || ok "nor is one that never answers"
+printf '0' >"$scratch/rcode"
+
+tor_is_running() { return 0; }
+sleep() { :; }
+newnyms=0
+tor_control() {
+  case "$1" in
+  'GETINFO status/circuit-established') printf '250-status/circuit-established=1\r\n250 OK\r\n' ;;
+  'SIGNAL NEWNYM') newnyms=$(( newnyms + 1 )); printf '250 OK\r\n' ;;
+  esac
+}
+# Each probe answers with the next time in the list, or fails on "x". The list
+# lives in a file: find_route calls the probe in a subshell, where a shifted
+# array would not stay shifted.
+probe_times=()
+route_probe_ms() {
+  local next
+  next=$(head -1 "$scratch/probes"); sed -i 1d "$scratch/probes"
+  [[ -z $next || $next == x ]] && return 1
+  printf '%s' "$next"
+}
+route() { newnyms=0; printf '%s\n' "${probe_times[@]}" >"$scratch/probes"; find_route >"$scratch/route.out" 2>&1; }
+
+probe_times=(820)
+route && [[ $newnyms == 0 ]] && ok "a fast route is taken at once, with no new circuits asked for" \
+  || bad "a fast route was not taken at once ($(cat "$scratch/route.out"))"
+probe_times=(6100 900)
+route && [[ $newnyms == 1 ]] && ok "a slow route is swapped for fresh circuits, and the fast one taken" \
+  || bad "a slow route was not retried ($newnyms new circuits: $(cat "$scratch/route.out"))"
+probe_times=(x x 1200)
+route && ok "routes that answer nothing are retried until one does" || bad "a dead first route gave up"
+probe_times=(7000 5200 9000)
+route && grep -q "5200" "$scratch/route.out" && ok "if every route is slow, the fastest is used rather than none" \
+  || bad "all-slow routes did not settle on the fastest ($(cat "$scratch/route.out"))"
+probe_times=(x x x)
+route && bad "connect would have gone on with no route at all" || ok "no route at all is a failure, so no rules go on"
+printf '2' >"$scratch/rcode"
+probe_times=(500 500 500)
+route && bad "a route with no working DNS was taken" || ok "a route whose DNS fails is no route"
+printf '0' >"$scratch/rcode"
+kill "$resolver" 2>/dev/null
+unset -f sleep route_probe_ms route tor_control tor_is_running
+DNS_PORT=9053
+
+echo
 echo "Exit countries"
 
 tor_is_running() { return 0; }

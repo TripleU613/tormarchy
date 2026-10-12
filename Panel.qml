@@ -699,9 +699,12 @@ Panel {
                 Text {
                   width: parent.width
                   horizontalAlignment: Text.AlignHCenter
-                  text: tor.bootstrapping ? tor.bootstrap + "%"
+                  // Still a percentage after bootstrap, while connect proves a
+                  // route: "ON" only once traffic has actually moved over.
+                  readonly property bool settling: tor.bootstrapping || (root.barConnecting && tor.torRunning)
+                  text: settling ? tor.bootstrap + "%"
                     : (tor.active ? qsTr("ON") : qsTr("OFF"))
-                  color: tor.bootstrapping ? root.foreground : root.dim
+                  color: settling ? root.foreground : root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.letterSpacing: 0.8

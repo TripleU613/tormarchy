@@ -621,7 +621,14 @@ $lan_nat
 
 $lan_filter
 
-    # Everything else: UDP, QUIC, ICMP, mDNS, NTP. This is the kill switch.
+    # Everything else: UDP, QUIC, ICMP, mDNS, NTP, and any connection opened
+    # before the rules went on. This is the kill switch.
+    #
+    # Dropped, and an app is not left hanging for it: a packet this machine
+    # sends that is dropped here fails the sender at once -- a reset on a TCP
+    # stream from before the switch, EPERM on UDP -- so a stream or a QUIC
+    # session gives up immediately and reconnects, through Tor. Measured, not
+    # assumed: a reject here behaved identically, so the simpler rule stays.
     counter drop
   }
 
@@ -932,6 +939,84 @@ wait_bootstrap() {
   printf '%s' "$pct"
 }
 
+# Tor reports a circuit it could use, the step after bootstrap: until then a
+# request has nothing to ride on.
+wait_circuit() {
+  local deadline=$(( $(date +%s) + ${1:-20} )) reply
+  while (( $(date +%s) < deadline )); do
+    tor_is_running || return 1
+    reply=$(tor_control 'GETINFO status/circuit-established' 2>/dev/null) || reply=""
+    [[ $reply == *"circuit-established=1"* ]] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# One lookup through tor's DNSPort, which is where every app's first request
+# goes the moment the rules are on. Tor gives each listening port circuits of its
+# own, so a fetch through the SOCKS port alone says nothing about this one.
+# A hand-built query on bash's own UDP socket: check.torproject.org, A record,
+# answered NOERROR under the same id.
+dns_probe() {
+  local query='\x7e\x51\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x05check\x0atorproject\x03org\x00\x00\x01\x00\x01'
+  local reply
+  exec 4<>"/dev/udp/127.0.0.1/$DNS_PORT" 2>/dev/null || return 1
+  printf '%b' "$query" >&4
+  reply=$(timeout "$ROUTE_PROBE_TIMEOUT" head -c 4 <&4 2>/dev/null | od -An -tx1 | tr -d ' \n')
+  exec 4<&- 2>/dev/null
+  # id 7e51, a response (top bit of byte 3), rcode 0 (low nibble of byte 4).
+  [[ $reply =~ ^7e51([0-9a-f]{2})([0-9a-f]{2})$ ]] || return 1
+  (( 16#${BASH_REMATCH[1]} & 0x80 )) && (( (16#${BASH_REMATCH[2]} & 0x0f) == 0 ))
+}
+
+# One real round trip through Tor, in milliseconds. Fails if nothing answered.
+route_probe_ms() {
+  local target=$1 seconds
+  seconds=$(curl -sf -o /dev/null -w '%{time_total}' -m "$ROUTE_PROBE_TIMEOUT" \
+    --socks5-hostname "127.0.0.1:$SOCKS_PORT" "$target" 2>/dev/null) || return 1
+  awk -v t="$seconds" 'BEGIN { printf "%d", t * 1000 }'
+}
+
+# Bootstrapped is not the same as carrying traffic. Before any rule goes on,
+# fetch something real through Tor and time it; if nothing answers, or the
+# answer is slow, ask for fresh circuits and try again. Moving the machine onto
+# a route that is dead or crawling is the network drop -- everything waits on
+# it -- where moving onto one already proven is a blip. The fetch also warms
+# tor's predicted ports: it keeps clean circuits ready for 443, so the traffic
+# that arrives the moment the rules do has one waiting.
+ROUTE_GOOD_MS=3500
+ROUTE_ATTEMPTS=3
+ROUTE_PROBE_TIMEOUT=15
+
+find_route() {
+  local attempt ms best="" target
+  wait_circuit 20 || true
+  for (( attempt = 0; attempt < ROUTE_ATTEMPTS; attempt++ )); do
+    cancelled_unless_running
+    # A different host each try, so one site being down is not "no route".
+    target=${SPEED_TARGETS[attempt % ${#SPEED_TARGETS[@]}]}
+    if ! dns_probe; then
+      echo "No answer from Tor's resolver yet; trying another route..."
+    elif ms=$(route_probe_ms "$target"); then
+      if [[ -z $best ]] || (( ms < best )); then best=$ms; fi
+      if (( ms <= ROUTE_GOOD_MS )); then
+        echo "Route found (${ms} ms)."
+        return 0
+      fi
+      echo "Route is slow (${ms} ms); trying another..."
+    else
+      echo "Nothing answered through Tor yet; trying another route..."
+    fi
+    if (( attempt + 1 < ROUTE_ATTEMPTS )); then
+      tor_control 'SIGNAL NEWNYM' >/dev/null 2>&1 || true
+      sleep 2
+    fi
+  done
+  # Slow is still a working route, and better than not connecting at all.
+  [[ -n $best ]] || return 1
+  echo "Using the fastest route found (${best} ms)."
+}
+
 # A disconnect that ran while connect was waiting stops tor. Nothing more to do
 # then, and certainly no bridges to start it back up again.
 cancelled_unless_running() {
@@ -1052,6 +1137,10 @@ NOTE
     [[ -f $BRIDGE_STASH ]] || hint+=" If this network blocks Tor, add bridges: tormarchy bridge set"
     die "tor stalled at ${pct}% bootstrap. $hint"
   fi
+
+  # The network is still the machine's own until this has a route that works.
+  echo "Finding a route..."
+  find_route || die "nothing got through Tor in $ROUTE_ATTEMPTS tries. No rules applied, networking is unchanged."
 
   take_lock
   # Checked again under the lock: a disconnect that got in between the wait
