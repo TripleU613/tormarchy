@@ -305,6 +305,10 @@ bootstrap_progress() { printf '100'; }
 cookie_path() { printf '/run/tor/control.authcookie'; }
 timedatectl() { printf 'yes\n'; }
 getent() { return 0; }
+# Connected means our ruleset is loaded, forward chain included. Without this
+# the result hung on the runner: a CI host with forwarding on (Docker does it)
+# and no tormarchy table is, correctly, a leak.
+nft() { [[ "$*" == "list chain inet $NFT_TABLE filter_forward" ]]; }
 curl() {
   case "$*" in
   *-6*) return 7 ;;
@@ -339,7 +343,7 @@ curl() { [[ $* == *--socks5-hostname* ]] && printf '{"IsTor":true,"IP":"185.220.
 json=$(cmd_doctor --json)
 is "browser-only checks the proxy itself rather than skipping routing" \
   "$(python3 -c 'import json,sys; print([c["status"] for c in json.loads(sys.argv[1])["checks"] if "SOCKS proxy" in c["text"]][0])' "$json" 2>/dev/null)" pass
-unset -f curl timedatectl getent
+unset -f curl timedatectl getent nft
 
 echo
 echo "The privilege boundary"
