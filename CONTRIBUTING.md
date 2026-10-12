@@ -105,6 +105,16 @@ namespaces; elsewhere it skips.
 from the Omarchy checkout you give it: `node tests/menu.js ~/src/omarchy`.
 `shell.sh` runs it against every checkout it is given.
 
+## Screenshots
+
+The README's pictures and `preview.png`, the marketplace card, are rendered from
+the QML rather than taken by hand, so they show what the code draws, in
+Omarchy's default theme and font. After changing the panel:
+
+```bash
+OMARCHY_PATH=~/src/omarchy make screenshots
+```
+
 ## If you touch the panel's tools
 
 The leak check makes real requests, so it runs when asked and never from a

@@ -1,7 +1,7 @@
 QMLLINT := /usr/lib/qt6/bin/qmllint
 QML_FILES := Panel.qml Service.qml TorIcon.qml TorWordmark.qml SpeedGauge.qml
 
-.PHONY: check check-root test shell qml-check hooks install reinstall doctor validate help
+.PHONY: check check-root test shell screenshots qml-check hooks install reinstall doctor validate help
 
 # Everything CI runs. Same script, so green here is green there.
 check:
@@ -23,6 +23,11 @@ test:
 # Needs PySide6; OMARCHY_PATH=~/src/omarchy to test against a checkout.
 shell:
 	.github/scripts/shell.sh
+
+# The README's pictures and the marketplace preview, rendered from the QML.
+# Needs PySide6, JetBrains Mono, and OMARCHY_PATH pointing at a checkout.
+screenshots:
+	python3 tests/qml/screenshots.py --omarchy "$${OMARCHY_PATH:-/usr/share/omarchy}"
 
 # Needs Qt. qs.Commons and qs.Ui cannot resolve without a full Omarchy install,
 # so most output is import noise -- but it still catches unused imports and
@@ -58,6 +63,7 @@ help:
 	@echo "check-root   the same, plus nft validation against the kernel"
 	@echo "test         name collisions, pinned decisions, helpers, Model.js"
 	@echo "shell        load the widget in Qt in every state, and run its scenarios"
+	@echo "screenshots  re-render the README pictures and preview.png"
 	@echo "qml-check    qmllint, import noise filtered out"
 	@echo "install      sudo ./tormarchy setup"
 	@echo "reinstall    uninstall, setup, restart the shell"

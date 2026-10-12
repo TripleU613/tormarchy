@@ -34,6 +34,7 @@ ap.add_argument("--status", help="JSON to answer `tormarchy status --json` with;
                                  "the helper reads as not installed")
 ap.add_argument("--bar", help="save the bar slot to this PNG")
 ap.add_argument("--panel", help="open the panel and save it to this PNG")
+ap.add_argument("--card", help="with --panel, also save just the panel itself, cropped, to this PNG")
 ap.add_argument("--foreground", default="#cdd6f4")
 ap.add_argument("--background", default="#1e1e2e")
 ap.add_argument("--settle", type=int, default=1500, help="milliseconds to run before reporting")
@@ -47,6 +48,10 @@ ap.add_argument("--call", action="append", default=[],
                      "tor.<name> calls it on the service")
 ap.add_argument("--font", action="append", default=[], help="extra font file to load, e.g. a Nerd Font, so glyphs render")
 ap.add_argument("--log", action="store_true", help="print every command run and every stdin payload")
+ap.add_argument("--theme", help="an Omarchy theme directory (with colors.toml) for the shell's palette, "
+                                "e.g. <omarchy>/themes/tokyo-night")
+ap.add_argument("--font-family", default="monospace", help="the bar's font family, e.g. 'JetBrains Mono'")
+ap.add_argument("--scale", type=float, default=1.0, help="device pixel ratio for the renders, e.g. 2")
 args = ap.parse_args()
 
 shell_dir = os.path.join(os.path.abspath(os.path.expanduser(args.omarchy)), "shell")
@@ -59,6 +64,28 @@ for value, name in ((args.status, "TORMARCHY_STUB_STATUS"), (args.doctor, "TORMA
         os.environ[name] = os.path.abspath(value)
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+if args.scale != 1.0:
+    os.environ["QT_SCALE_FACTOR"] = str(args.scale)
+if args.theme:
+    # A home of its own holding only the theme, where Omarchy's Color looks.
+    theme_home = tempfile.mkdtemp(prefix="tormarchy-theme-home-")
+    theme_dir = os.path.join(theme_home, ".local", "state", "omarchy", "current", "theme")
+    os.makedirs(theme_dir)
+    for name in ("colors.toml", "shell.toml"):
+        if os.path.exists(os.path.join(args.theme, name)):
+            shutil.copy(os.path.join(args.theme, name), theme_dir)
+    os.environ["HOME"] = theme_home
+    os.environ["TORMARCHY_STUB_FILES"] = "1"
+    # The few colours the host draws itself, from the same file.
+    import re
+    palette = dict(re.findall(r'^(\w+)\s*=\s*"(#[0-9a-fA-F]{6})"', open(os.path.join(args.theme, "colors.toml")).read(), re.M))
+    args.foreground = palette.get("foreground", args.foreground)
+    args.background = palette.get("background", args.background)
+    card_border, card_border_width = palette.get("accent", "#ffffff"), 2
+    urgent_color = palette.get("red", "#f38ba8")
+else:
+    card_border, card_border_width = "#40ffffff", 1
+    urgent_color = "#f38ba8"
 
 from PySide6.QtCore import QMetaObject, QObject, QTimer, QUrl, QtMsgType, qInstallMessageHandler  # noqa: E402
 from PySide6.QtGui import QFontDatabase, QGuiApplication  # noqa: E402
@@ -108,8 +135,8 @@ Window {
     foreground: "%(fg)s"
     barForeground: "%(fg)s"
     background: "%(bg)s"
-    urgent: "#f38ba8"
-    fontFamily: "monospace"
+    urgent: "%(urgent)s"
+    fontFamily: "%(family)s"
     barSize: 26
   }
 
@@ -122,7 +149,8 @@ Window {
     width: 0
     height: 0
     color: "%(bg)s"
-    border.color: Qt.rgba(1, 1, 1, 0.25)
+    border.color: "%(border)s"
+    border.width: %(borderw)d
     radius: 6
     Item { objectName: "cardContent"; anchors.fill: parent; anchors.margins: 14 }
   }
@@ -157,7 +185,8 @@ Window {
   }
 }
 """ % {
-    "fg": args.foreground, "bg": args.background,
+    "fg": args.foreground, "bg": args.background, "family": args.font_family,
+    "urgent": urgent_color, "border": card_border, "borderw": card_border_width,
     "w": 520 if panel_mode else 200, "h": 720 if panel_mode else 40,
     "slotx": "120" if panel_mode else "Math.round((win.width - width) / 2)",
     "sloty": "10" if panel_mode else "7",
@@ -267,13 +296,20 @@ def report():
             failed = True
     if args.bar or args.panel:
         image = win.grabWindow()
+        # Device pixels per item pixel, so crops land where they should at --scale.
+        ratio = image.width() / max(1, win.width())
         if args.panel:
             image.save(args.panel)
             print("saved", args.panel)
+        if args.card and args.panel:
+            card = win.findChild(QObject, "card")
+            image.copy(round(card.property("x") * ratio), round(card.property("y") * ratio),
+                       round(card.property("width") * ratio), round(card.property("height") * ratio)).save(args.card)
+            print("saved", args.card)
         if args.bar:
             slot = win.findChild(QObject, "slot")
-            image.copy(int(slot.property("x")) - 10, int(slot.property("y")) - 4,
-                       int(slot.property("width")) + 20, 34).save(args.bar)
+            image.copy(round((slot.property("x") - 10) * ratio), round((slot.property("y") - 4) * ratio),
+                       round((slot.property("width") + 20) * ratio), round(34 * ratio)).save(args.bar)
             print("saved", args.bar)
 
     plugin_dir = os.path.abspath(args.plugin)

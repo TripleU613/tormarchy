@@ -368,16 +368,48 @@ class IpcHandler(QObject):
     enabled = Property(bool, _get_enabled, _set_enabled, notify=enabledChanged)
 
 
+# Reads nothing unless TORMARCHY_STUB_FILES is set: the tests describe a machine
+# with no Omarchy state at all. load.py --theme sets it, with HOME pointed at a
+# theme of its own, so Omarchy's Color reads a real colors.toml.
+def _fv_get_path(self):
+    return getattr(self, "_path", "")
+
+
+def _fv_set_path(self, v):
+    if v == _fv_get_path(self):
+        return
+    self._path = v
+    self.pathChanged.emit()
+    if os.environ.get("TORMARCHY_STUB_FILES"):
+        QTimer.singleShot(0, lambda: _fv_load(self))
+
+
+def _fv_load(self):
+    try:
+        with open(_fv_get_path(self), encoding="utf-8") as f:
+            self._text = f.read()
+    except OSError:
+        self._text = ""
+        self.loadFailed.emit()
+        return
+    self.loaded.emit()
+
+
+_fv_path_changed = Signal()
 FileView = QmlElement(object_list("FileView", props=[
-    ("path", str, ""), ("watchChanges", bool, False), ("blockLoading", bool, False),
+    ("watchChanges", bool, False), ("blockLoading", bool, False),
     ("blockAllReads", bool, False), ("printErrors", bool, True), ("preload", bool, True),
     ("atomicWrites", bool, True), ("loaded_", bool, False), ("adapter", QObject, None)],
     signals=["loaded", "loadFailed", "fileChanged", "saved", "saveFailed"],
     extra={
-        "text": Slot(result=str)(lambda self: ""),
-        "reload": Slot()(lambda self: None),
-        "setText": Slot(str)(lambda self, t: None),
-        "writeAdapter": Slot()(lambda self: None),
+        "pathChanged": _fv_path_changed,
+        "path": Property(str, _fv_get_path, _fv_set_path, notify=_fv_path_changed),
+        # Named explicitly, like Process.write: a Slot otherwise takes the
+        # function's own name and QML finds no text().
+        "text": Slot(result=str, name="text")(lambda self: getattr(self, "_text", "")),
+        "reload": Slot(name="reload")(lambda self: _fv_load(self) if os.environ.get("TORMARCHY_STUB_FILES") else None),
+        "setText": Slot(str, name="setText")(lambda self, t: None),
+        "writeAdapter": Slot(name="writeAdapter")(lambda self: None),
     }))
 JsonAdapter = QmlElement(object_list("JsonAdapter"))
 

@@ -86,12 +86,9 @@ logged in.
 
 ## Panel
 
-
 <p align="center">
-  <img alt="Connected" width="46%" src="https://github.com/user-attachments/assets/f670dd75-11cd-498e-96b9-0e8a0ca544ae" />
+  <img alt="The panel, connected" width="62%" src="assets/screenshots/panel.png">
 </p>
-
-
 
 Left click opens it, right click toggles, middle click gets a new circuit. Hover
 it for the status in words.
@@ -102,6 +99,10 @@ Hover a hop in the circuit for the relay behind it — name, speed, and what the
 network trusts it with.
 
 The onion in the bar says where you are:
+
+<p align="center">
+  <img alt="The bar icon on, connecting, browser-only, off, and with the kill switch holding" width="60%" src="assets/screenshots/bar.png">
+</p>
 
 | | |
 |---|---|
@@ -116,6 +117,10 @@ connection.
 
 ### Leak check
 
+<p align="center">
+  <img alt="The leak check, every check passed" width="52%" src="assets/screenshots/leak-check.png">
+</p>
+
 The panel's answer to "is this actually working?". It asks check.torproject.org
 whether you're coming from Tor, tries to reach an IPv6 host directly (which
 should fail), and checks DNS, forwarding and your clock — the same checks as
@@ -128,6 +133,10 @@ connecting, switching mode — clears the old result rather than leaving it
 vouching for a setup that's gone.
 
 ### Bridges
+
+<p align="center">
+  <img alt="A paste of bridges, previewed before use" width="52%" src="assets/screenshots/bridges.png">
+</p>
 
 If the network you're on blocks Tor, bridges get you in. Get some from
 [bridges.torproject.org](https://bridges.torproject.org/options) or
