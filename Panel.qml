@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import Quickshell.Io
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
@@ -21,6 +22,8 @@ Panel {
   LayoutMirroring.childrenInherit: true
   property int modeIndex: 0
   property bool cursorActive: false
+  // Which tool tile is open beneath its band: "" | "leaks" | "bridges".
+  property string expandedTool: ""
 
   // Every palette read goes through the Commons alias. Qt 6.12 ships a `Color`
   // type of its own, and a bare `Color.accent` now resolves to that instead of
@@ -101,6 +104,7 @@ Panel {
   readonly property real metricsHeight: Style.space(39)  // 48px
   readonly property real modeHeight: Style.space(42)     // 52px
   readonly property real actionHeight: Style.space(29)   // 36px
+  readonly property real toolHeight: Style.space(42)     // 52px, the mode row's height
   readonly property real hairline: Math.max(1, Style.space(1))
 
   readonly property color surfaceFill: Util.alpha(foreground, 0.05)
@@ -115,6 +119,202 @@ Panel {
     border.color: root.surfaceLine
     radius: Style.cornerRadius
   }
+  // A tool's tile in band 4: glyph, title, one line of state. Selecting it opens
+  // the tool beneath the band.
+  component ToolTile: Surface {
+    id: tile
+    property string section: ""
+    property string glyph: ""
+    property color glyphColor: root.foreground
+    property string title: ""
+    property string subtitle: ""
+    property color subtitleColor: root.dim
+    // What the tool does, for the hover bubble. Never on the tile itself.
+    property string tip: ""
+    signal activated()
+
+    readonly property bool hot: tileMouse.containsMouse
+      || (root.cursorActive && root.focusSection === section)
+    readonly property bool open: root.expandedTool === section
+
+    height: root.toolHeight
+    clip: true
+    border.color: hot || open ? Util.alpha(root.foreground, 0.55) : root.surfaceLine
+
+    Text {
+      id: tileGlyph
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(12)
+      anchors.verticalCenter: parent.verticalCenter
+      text: tile.glyph
+      color: tile.glyphColor
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.title
+    }
+
+    Column {
+      anchors.left: tileGlyph.right
+      anchors.leftMargin: Style.space(10)
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(10)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(1)
+
+      Text {
+        width: parent.width
+        elide: Text.ElideRight
+        text: tile.title
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+      }
+
+      Text {
+        width: parent.width
+        elide: Text.ElideRight
+        visible: text !== ""
+        text: tile.subtitle
+        color: tile.subtitleColor
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+    }
+
+    MouseArea {
+      id: tileMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: tile.activated()
+      onContainsMouseChanged: if (containsMouse) {
+        root.cursorActive = true
+        root.focusSection = tile.section
+      }
+    }
+
+    PanelToolTip {
+      visible: tileMouse.containsMouse && tile.tip !== ""
+      text: tile.tip
+      fontFamily: root.fontFamily
+    }
+  }
+
+  // No sentences on the panel. A label says what something is; anything that
+  // explains or instructs goes in a hover bubble -- this dot where nothing else
+  // on screen can carry it.
+  component InfoDot: Text {
+    id: info
+    property string tip: ""
+    text: "\u{f02fd}"
+    color: infoMouse.containsMouse ? root.foreground : root.dim
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.body
+
+    MouseArea {
+      id: infoMouse
+      anchors.fill: parent
+      anchors.margins: -Style.space(4)
+      hoverEnabled: true
+      acceptedButtons: Qt.NoButton
+    }
+
+    PanelToolTip {
+      visible: infoMouse.containsMouse && info.tip !== ""
+      text: info.tip
+      fontFamily: root.fontFamily
+    }
+  }
+
+  // A message as one short line -- a warning, an error from the helper -- with
+  // the whole of it in the bubble. Helper errors run to two sentences, and a
+  // wrapped paragraph in red is exactly what this panel does not do.
+  component Brief: Text {
+    id: brief
+    property string full: ""
+    property string short: Model.brief(full)
+    visible: full !== ""
+    width: parent ? parent.width : implicitWidth
+    elide: Text.ElideRight
+    maximumLineCount: 1
+    textFormat: Text.PlainText
+    text: short
+    color: root.urgent
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
+
+    MouseArea {
+      id: briefMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.NoButton
+    }
+
+    PanelToolTip {
+      visible: briefMouse.containsMouse && brief.full !== brief.short
+      text: Model.wrapTip(brief.full)
+      fontFamily: root.fontFamily
+    }
+  }
+
+  // A result in a word, with a glyph for how it went and the detail on hover:
+  // a leak check, or a transport in the bridge set.
+  component Chip: Surface {
+    id: chip
+    property string glyph: ""
+    property string label: ""
+    property string tip: ""
+    property color tint: root.foreground
+    width: chipRow.implicitWidth + Style.space(16)
+    height: Style.space(26)
+    border.color: tint === root.urgent ? root.urgent : root.surfaceLine
+
+    Row {
+      id: chipRow
+      anchors.centerIn: parent
+      spacing: Style.space(5)
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        text: chip.glyph
+        color: chip.tint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        text: chip.label
+        textFormat: Text.PlainText
+        color: chip.tint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+    }
+
+    MouseArea {
+      id: chipMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.NoButton
+    }
+
+    PanelToolTip {
+      visible: chipMouse.containsMouse && chip.tip !== ""
+      text: chip.tip
+      fontFamily: root.fontFamily
+    }
+  }
+
+  // Ticks only while the panel is open, so "checked 2 min ago" stays true.
+  property double now: Date.now()
+  Timer {
+    interval: 30000
+    repeat: true
+    running: root.opened
+    triggeredOnStart: true
+    onTriggered: root.now = Date.now()
+  }
+
   function gridColumn(available) { return (available - gridGap * 2) / 3 }
   function gridSpan2(available) { return gridColumn(available) * 2 + gridGap }
 
@@ -164,6 +364,8 @@ Panel {
     if (showExit) order.push("exit")
     order.push("speed")
     if (tor.canNewCircuit) order.push("newnym")
+    order.push("leaks")
+    order.push("bridges")
     order.push("mode")
     return order
   }
@@ -205,6 +407,27 @@ Panel {
     else if (focusSection === "exit") exitPicker.toggle()
     else if (focusSection === "speed") tor.measureSpeed()
     else if (focusSection === "mode") tor.setMode(Model.MODE_ORDER[modeIndex])
+    else if (focusSection === "leaks") openLeakCheck()
+    else if (focusSection === "bridges") toggleTool("bridges")
+  }
+
+  function toggleTool(name) {
+    expandedTool = expandedTool === name ? "" : name
+    // A paste is only ever previewed while its section is on screen.
+    if (expandedTool !== "bridges") tor.cancelBridges()
+    else tor.loadBridgeDetail()
+  }
+
+  // Opening the leak check runs it, unless a result is already on screen: one
+  // that is there describes the current state, because every routing change
+  // clears it. Running it again is the explicit button beneath.
+  function openLeakCheck() {
+    if (expandedTool === "leaks") {
+      expandedTool = ""
+      return
+    }
+    expandedTool = "leaks"
+    if (!tor.leakResult && !tor.checkingLeaks) tor.checkLeaks()
   }
 
   // canToggle rather than !busy: a connect still waiting on tor's bootstrap can
@@ -265,7 +488,10 @@ Panel {
   // would see.
   onOpenedChanged: {
     tor.watching = opened
-    if (!opened) return
+    if (!opened) {
+      expandedTool = ""
+      return
+    }
     cursorActive = false
     if (panelFlick) panelFlick.contentY = 0
     tor.refresh()
@@ -278,6 +504,7 @@ Panel {
 
   Service {
     id: tor
+    bundledHelper: root.pluginDir + "/tormarchy"
     settings: root.settings
   }
 
@@ -289,10 +516,12 @@ Panel {
     function onModeChanged() { root.ensureCursor() }
   }
 
-  // ShellIpc rather than a bare IpcHandler: it also registers with the shell's
-  // own socket, so `omarchy-shell tripleu.tor toggle` reaches it without
-  // starting a qs ipc client, the same as every first-party panel.
-  ShellIpc {
+  // Quickshell's own IpcHandler, not Omarchy's ShellIpc. ShellIpc is newer than
+  // Omarchy 4.0.4, the release most machines run, and a widget naming a type
+  // its shell lacks fails to load and is left out of the bar without a word.
+  // omarchy-shell reaches an IpcHandler on every version: through qs ipc on
+  // 4.0.x, and on later shells by falling back to qs ipc after its own socket.
+  IpcHandler {
     target: root.ipcTarget
     function open(): void { root.open() }
     function close(): void { root.close() }
@@ -309,6 +538,22 @@ Panel {
     }
     function toggleTor(): string { root.toggleConnected(); return "ok" }
     function status(): string { return tor.statusText }
+    // Asked for by name, so it always shows the check and runs it -- never the
+    // `d` key's toggle, which would fold an open check away instead.
+    function checkLeaks(): string {
+      root.open()
+      root.focusSection = "leaks"
+      root.expandedTool = "leaks"
+      tor.cancelBridges()
+      tor.checkLeaks()
+      return "ok"
+    }
+    function bridges(): string {
+      root.open()
+      root.focusSection = "bridges"
+      if (root.expandedTool !== "bridges") root.toggleTool("bridges")
+      return "ok"
+    }
   }
 
   BarIconButton {
@@ -319,13 +564,13 @@ Panel {
     // panel is one click away for anything more specific. The tooltip says it
     // in words for anyone who has not learned the icon yet.
     tooltipText: tor.statusText
-    // No position of its own. BarIconContent measures what the mark paints,
-    // scales it to the bar's icon size and centres it on the slot, exactly as
-    // it does every first-party glyph -- placing it here as well only fought
-    // that, and lost.
+    // No position of its own: the mark centres itself on whatever box the
+    // shell gives it (see TorIcon). The size is the bar's icon size where the
+    // shell has one; Omarchy 4.0.x has only the 16px canvas its glyphs are
+    // drawn about 12px inside, so it gets the same three quarters.
     iconComponent: Component {
       TorIcon {
-        iconSize: Style.bar.iconSize
+        iconSize: Style.bar.iconSize || Math.round((Style.bar.iconCanvas || 16) * 0.75)
         color: root.barIconColor
         layerOpacity: root.barLayerOpacity
         coreVisible: root.barRouted || root.barBrowserOnly || root.barBlocked || root.barConnecting
@@ -366,6 +611,8 @@ Panel {
         else if (key === "e") root.openExitPicker()
         else if (key === "s") tor.measureSpeed()
         else if (key === "r") tor.refresh()
+        else if (key === "d") { root.cursorActive = true; root.focusSection = "leaks"; root.openLeakCheck() }
+        else if (key === "b") { root.cursorActive = true; root.focusSection = "bridges"; root.toggleTool("bridges") }
       }
 
       Flickable {
@@ -453,9 +700,12 @@ Panel {
                 Text {
                   width: parent.width
                   horizontalAlignment: Text.AlignHCenter
-                  text: tor.bootstrapping ? tor.bootstrap + "%"
+                  // Still a percentage after bootstrap, while connect proves a
+                  // route: "ON" only once traffic has actually moved over.
+                  readonly property bool settling: tor.bootstrapping || (root.barConnecting && tor.torRunning)
+                  text: settling ? tor.bootstrap + "%"
                     : (tor.active ? qsTr("ON") : qsTr("OFF"))
-                  color: tor.bootstrapping ? root.foreground : root.dim
+                  color: settling ? root.foreground : root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.letterSpacing: 0.8
@@ -518,9 +768,9 @@ Panel {
                   placeholderText: qsTr("Search…")
                   emptyText: tor.loadingExitCountries ? qsTr("Loading…")
                     : (tor.torRunning ? qsTr("None found") : qsTr("Not connected"))
-                  options: Model.exitOptions(tor.exitCountries)
+                  options: Model.exitOptions(tor.exitCountries, root.recentExits, tor.excludedExits)
                   value: tor.requestedExit === "" ? "auto" : tor.requestedExit
-                  triggerLabel: Model.exitLabel(tor.requestedExit)
+                  triggerLabel: Model.exitLabel(tor.requestedExit, tor.excludedExits)
                   hasCursor: root.cursorActive && root.focusSection === "exit"
                   onChanged: function(value) { root.chooseExit(value) }
                   onHovered: function(isHovered) {
@@ -535,15 +785,22 @@ Panel {
             // tor gone, the network shut on purpose. The switch still reads ON
             // then, correctly, and without this nothing on screen explained why
             // the machine had gone quiet.
-            Text {
-              width: parent.width
-              visible: text !== ""
-              wrapMode: Text.WordWrap
-              textFormat: Text.PlainText
-              text: tor.warnings.length > 0 ? String(tor.warnings[0]) : ""
-              color: root.urgent
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
+            Brief {
+              full: tor.warnings.length > 0 ? String(tor.warnings[0]) : ""
+              short: Model.briefWarning(full)
+            }
+
+            // This plugin's helper is newer than the installed one. Setup again
+            // is the only way it gets there, and it needs a terminal.
+            Button {
+              visible: tor.helperStale
+              text: qsTr("Update helper")
+              bordered: true
+              focusable: false
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              tooltipText: Model.wrapTip(qsTr("This plugin was updated, but the helper it runs was not. Updating runs setup again, once, in a terminal."))
+              onClicked: root.runSetup()
             }
 
             // Band 2 -- two paired surfaces of identical height and border:
@@ -621,7 +878,7 @@ Panel {
                       horizontalAlignment: Text.AlignHCenter
                       elide: Text.ElideRight
                       visible: text !== ""
-                      text: tor.speedError !== "" ? tor.speedError
+                      text: tor.speedError !== "" ? Model.brief(tor.speedError, 22)
                         : (tor.measuringSpeed ? qsTr("Measuring…") : Model.latencyVerdict(tor.latencyMs))
                       color: tor.speedError !== "" ? root.urgent : root.dim
                       font.family: root.fontFamily
@@ -735,6 +992,22 @@ Panel {
                         opacity: index === tor.path.length - 1 ? 1.0 : 0.6
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.bodySmall
+
+                        MouseArea {
+                          id: hopMouse
+                          anchors.fill: parent
+                          anchors.margins: -Style.space(2)
+                          hoverEnabled: true
+                          acceptedButtons: Qt.NoButton
+                        }
+
+                        // Which relay this is, from the consensus: role, where
+                        // it is, its name, how fast, what it is trusted with.
+                        PanelToolTip {
+                          visible: hopMouse.containsMouse
+                          text: Model.hopTooltip(tor.hops[index] || null, index, tor.path.length, tor.path[index])
+                          fontFamily: root.fontFamily
+                        }
                       }
                     }
                   }
@@ -757,6 +1030,197 @@ Panel {
                 // widest thing in the row.
                 label: qsTr("AGE")
                 value: Model.formatAge(tor.circuitAgeSec)
+              }
+            }
+
+            // Band 4 -- the tools: the leak check across two columns, bridges
+            // in the third, on the same grid and Surface as the latency card so
+            // the band lines up with everything above it. Each opens beneath
+            // the band rather than in a popup, so it scrolls with the panel.
+            Row {
+              id: toolsRow
+              width: parent.width
+              spacing: connectedBody.gap
+
+              ToolTile {
+                width: root.gridSpan2(toolsRow.width)
+                section: "leaks"
+                glyph: tor.checkingLeaks ? "󰔟"
+                  : (tor.leakResult ? Model.doctorGlyph(Model.doctorOverall(tor.leakResult)) : "󰕥")
+                glyphColor: Model.doctorOverall(tor.leakResult) === "fail" ? root.urgent : root.foreground
+                title: qsTr("Leak check")
+                subtitle: tor.checkingLeaks ? qsTr("Checking…")
+                  : (tor.leakError !== "" ? Model.brief(tor.leakError, 24)
+                  : (tor.leakResult ? Model.doctorSummary(tor.leakResult) + " · " + Model.formatAgo((root.now - tor.leakCheckedAtMs) / 1000)
+                  : qsTr("Not run yet")))
+                subtitleColor: tor.leakError !== "" ? root.urgent : root.dim
+                tip: Model.wrapTip(qsTr("Asks check.torproject.org whether you are coming from Tor, tries an IPv6 host directly, and checks DNS, forwarding and the clock. Runs only when you ask, and takes up to half a minute."))
+                onActivated: root.openLeakCheck()
+              }
+
+              ToolTile {
+                width: root.gridColumn(toolsRow.width)
+                section: "bridges"
+                glyph: "󰘘"
+                title: qsTr("Bridges")
+                subtitle: Model.bridgeStateLabel(tor.bridgeState, tor.bridgeDetail)
+                tip: Model.wrapTip(qsTr("For networks that block Tor. Paste bridge lines from the clipboard to use them."))
+                onActivated: root.toggleTool("bridges")
+              }
+            }
+
+            // The leak check's results: one chip per check, named in a word,
+            // with what it found in the bubble.
+            Column {
+              id: leakDetail
+              visible: root.expandedTool === "leaks"
+              width: parent.width
+              spacing: Style.space(8)
+
+              Flow {
+                visible: !!tor.leakResult
+                width: parent.width
+                spacing: Style.space(6)
+
+                Repeater {
+                  model: tor.leakResult ? tor.leakResult.checks : []
+
+                  Chip {
+                    required property var modelData
+                    glyph: Model.doctorGlyph(modelData.status)
+                    label: Model.checkLabel(modelData)
+                    tip: Model.checkTip(modelData)
+                    tint: modelData.status === "fail" ? root.urgent
+                      : (modelData.status === "skip" ? root.dim : root.foreground)
+                  }
+                }
+              }
+
+              Button {
+                visible: !tor.checkingLeaks
+                text: tor.leakResult ? qsTr("Check again") : qsTr("Check now")
+                bordered: true
+                focusable: false
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: tor.checkLeaks()
+              }
+            }
+
+            // Bridges: what is set up and whether this machine can run it, then
+            // a way to change it that never puts a bridge line on a command
+            // line. A paste is read straight off the clipboard, shown as counts
+            // for a yes or no, and handed to tormarchy over stdin.
+            Column {
+              id: bridgeSection
+              visible: root.expandedTool === "bridges"
+              width: parent.width
+              spacing: Style.space(8)
+
+              readonly property var current: tor.bridgeDetail
+              readonly property var preview: tor.bridgePreview
+              readonly property var missing: Model.missingTransports(preview)
+              readonly property bool canApply: !!preview && missing.length === 0
+                && preview.invalidLines === 0 && !tor.busy && !tor.bridgeWorking
+              // The paste on its way in, else the set already saved.
+              readonly property var shown: preview ? preview : (current && current.ok ? current : null)
+
+              Text {
+                visible: !!bridgeSection.preview
+                text: qsTr("Pasted · %1").arg(Model.bridgeCountText(bridgeSection.preview))
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
+
+              // One chip per transport. One this machine cannot run is the
+              // usual reason bridges "do nothing", so it is marked where it is
+              // listed, with what to install in its bubble.
+              Flow {
+                visible: !!bridgeSection.shown && (bridgeSection.shown.transports.length > 0
+                  || bridgeSection.shown.invalidLines > 0)
+                width: parent.width
+                spacing: Style.space(6)
+
+                Repeater {
+                  model: bridgeSection.shown ? bridgeSection.shown.transports : []
+
+                  Chip {
+                    required property var modelData
+                    glyph: Model.doctorGlyph(modelData.available ? "pass" : "fail")
+                    label: qsTr("%1 %2").arg(modelData.count).arg(modelData.name)
+                    tint: modelData.available ? root.foreground : root.urgent
+                    tip: modelData.available ? ""
+                      : Model.wrapTip(qsTr("%1 is not installed. Install it with: %2").arg(modelData.name).arg(modelData.installHint))
+                  }
+                }
+
+                Chip {
+                  visible: !!bridgeSection.preview && bridgeSection.preview.invalidLines > 0
+                  glyph: Model.doctorGlyph("fail")
+                  label: bridgeSection.preview && bridgeSection.preview.invalidLines === 1
+                    ? qsTr("1 invalid line")
+                    : qsTr("%1 invalid lines").arg(bridgeSection.preview ? bridgeSection.preview.invalidLines : 0)
+                  tint: root.urgent
+                  tip: Model.wrapTip(qsTr("Copy only the lines that start with a transport, like obfs4, then paste again."))
+                }
+              }
+
+              Brief {
+                full: tor.bridgeMessage
+              }
+
+              Row {
+                spacing: Style.space(8)
+
+                Button {
+                  visible: !!bridgeSection.preview
+                  text: qsTr("Use these")
+                  bordered: true
+                  focusable: false
+                  enabled: bridgeSection.canApply
+                  opacity: enabled ? 1 : 0.4
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: tor.applyBridges()
+                }
+
+                Button {
+                  visible: !!bridgeSection.preview
+                  text: qsTr("Cancel")
+                  focusable: false
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: tor.cancelBridges()
+                }
+
+                Button {
+                  visible: !bridgeSection.preview
+                  text: tor.bridgeWorking ? qsTr("Reading…") : qsTr("Paste bridges")
+                  bordered: true
+                  focusable: false
+                  enabled: !tor.bridgeWorking && !tor.busy
+                  opacity: enabled ? 1 : 0.4
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: tor.pasteBridges()
+                }
+
+                Button {
+                  visible: !bridgeSection.preview && tor.bridgeState !== "off"
+                  text: tor.bridgeState === "active" ? qsTr("Turn off") : qsTr("Turn on")
+                  focusable: false
+                  enabled: !tor.busy && !tor.bridgeWorking
+                  opacity: enabled ? 1 : 0.4
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: tor.setBridgesEnabled(tor.bridgeState !== "active")
+                }
+
+                InfoDot {
+                  anchors.verticalCenter: parent.verticalCenter
+                  tip: Model.wrapTip(qsTr("Get bridges at bridges.torproject.org or from @GetBridgesBot on Telegram. Copy the lines, then paste them here."))
+                }
               }
             }
           }
@@ -782,34 +1246,10 @@ Panel {
               maxWidth: setupHero.width
             }
 
-            Column {
-              width: parent.width
-              spacing: Style.space(4)
-
-              Text {
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.WordWrap
-                text: qsTr("One-time setup, then it's a toggle.")
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-              }
-
-              Text {
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.WordWrap
-                text: qsTr("Installs tor and the helper in a terminal with sudo, so the switch never asks for a password.")
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-            }
-
             Button {
               width: parent.width
               text: qsTr("Run setup")
+              tooltipText: Model.wrapTip(qsTr("Once, in a terminal with sudo: installs tor and the helper. After that the switch never asks for a password."))
               bordered: true
               focusable: false
               hasCursor: root.cursorActive && root.focusSection === "setup"
@@ -921,7 +1361,7 @@ Panel {
 
                     PanelToolTip {
                       visible: segmentHover.containsMouse
-                      text: Model.modeTooltip(modelData)
+                      text: Model.wrapTip(Model.modeTooltip(modelData))
                     }
                   }
                 }
@@ -940,14 +1380,8 @@ Panel {
           // two differ. tormarchy-panic still exists as a command, which is
           // where it belongs: its entire purpose is being reachable when the
           // network is down and this panel is not an option.
-          Text {
-            visible: tor.lastError !== ""
-            width: parent.width
-            wrapMode: Text.WordWrap
-            text: tor.lastError
-            color: root.urgent
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
+          Brief {
+            full: tor.lastError
           }
         }
       }

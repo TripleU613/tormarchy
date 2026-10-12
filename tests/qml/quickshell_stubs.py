@@ -8,9 +8,12 @@ and a compile error is exactly what load.py is there to find. When Omarchy's
 components start using something new, load.py reports it as a host error and
 the property goes here.
 
-Process is the one stand-in with behaviour: it answers `tormarchy status
---json` from the file in $TORMARCHY_STUB_STATUS, streams a fixed latency for
-`pingd`, and exits 0 for anything else.
+Process is the one stand-in with behaviour. It answers `tormarchy status --json`,
+`doctor --json`, `bridge status --json`, `bridge check` and `wl-paste` from the
+fixture files named by the TORMARCHY_STUB_* variables, streams a fixed latency
+for `pingd`, and exits 0 for anything else. A process with stdin enabled waits
+for stdin to be closed before it "runs", as one reading to EOF would. Every argv
+and every stdin payload is logged in COMMAND_LOG and STDIN_LOG.
 """
 import os
 
@@ -199,6 +202,18 @@ LazyLoader = QmlElement(object_list("LazyLoader", props=[
 QML_IMPORT_NAME = "Quickshell.Io"
 
 
+# Every command a Process ran, as argv, and everything written to its stdin.
+# load.py reads these to assert on what the plugin asked for -- that bridge
+# lines went over stdin and not argv, that a notification used the right sender.
+COMMAND_LOG = []
+STDIN_LOG = []
+
+
+def _fixture(name):
+    path = os.environ.get(name, "")
+    return open(path).read() if path and os.path.exists(path) else None
+
+
 def _proc_get_running(self):
     return getattr(self, "_running", False)
 
@@ -209,7 +224,35 @@ def _proc_set_running(self, v):
     self._running = v
     self.runningChanged.emit()
     if v:
+        self._stdin = ""
+        QTimer.singleShot(0, lambda: _proc_start(self))
+
+
+def _proc_start(self):
+    if not _proc_get_running(self):
+        return
+    self.started.emit()
+    # With stdin open the process waits for its input to end, as a real one
+    # reading to EOF would; closing stdin (stdinEnabled = false) is the EOF.
+    if not _proc_get_stdin(self):
+        _proc_run(self)
+
+
+def _proc_get_stdin(self):
+    return getattr(self, "_stdinEnabled", False)
+
+
+def _proc_set_stdin(self, v):
+    if v == _proc_get_stdin(self):
+        return
+    self._stdinEnabled = v
+    self.stdinEnabledChanged.emit()
+    if not v and _proc_get_running(self):
         QTimer.singleShot(0, lambda: _proc_run(self))
+
+
+def _proc_write(self, data):
+    self._stdin = getattr(self, "_stdin", "") + str(data)
 
 
 def _proc_finish(self, code):
@@ -221,40 +264,71 @@ def _proc_finish(self, code):
 def _proc_run(self):
     if not _proc_get_running(self):
         return
-    cmd = " ".join(str(c) for c in (getattr(self, "_command", []) or []))
+    argv = [str(c) for c in (getattr(self, "_command", []) or [])]
+    # Matched with the shell quoting run() adds taken off, so
+    # bash -c "exec 'tormarchy' 'connect' 'lan'" reads as tormarchy connect lan.
+    cmd = " ".join(argv).replace("'", "")
+    COMMAND_LOG.append(argv)
+    if getattr(self, "_stdin", ""):
+        STDIN_LOG.append((cmd, self._stdin))
     out = getattr(self, "_stdout", None)
     if "pingd" in cmd:
         if out is not None and hasattr(out, "read"):
             out.read.emit(os.environ.get("TORMARCHY_STUB_PING", "612"))
         return  # keeps running, like the real stream
-    text = ""
-    if "status --json" in cmd:
-        path = os.environ.get("TORMARCHY_STUB_STATUS", "")
-        if not (path and os.path.exists(path)):
+    text, code = "", 0
+    if "status --json" in cmd and "bridge" not in cmd:
+        text = _fixture("TORMARCHY_STUB_STATUS")
+        if text is None:
             _proc_finish(self, 127)
             return
-        text = open(path).read()
+    elif "doctor --json" in cmd:
+        text = _fixture("TORMARCHY_STUB_DOCTOR") or ""
+        code = 0 if '"ok":true' in text.replace(" ", "") else 1
+    elif "bridge status --json" in cmd:
+        text = _fixture("TORMARCHY_STUB_BRIDGES") or '{"state":"off","count":0,"transports":[]}'
+    elif "bridge check" in cmd:
+        text = _fixture("TORMARCHY_STUB_BRIDGE_CHECK") or ""
+    elif argv[:1] == ["wl-paste"]:
+        text = _fixture("TORMARCHY_STUB_CLIPBOARD") or ""
+    elif "cmp -s" in cmd:
+        # The installed helper against the bundled one: 1 when they differ.
+        code = int(os.environ.get("TORMARCHY_STUB_HELPER_STALE", "0"))
+    elif argv[:1] == ["omarchy-notification-send"]:
+        text = "7\n" if "-p" in argv else ""
     elif "exit --list" in cmd:
         text = "de\nnl\nus\nse\nch\n"
+    elif "tormarchy connect" in cmd and os.environ.get("TORMARCHY_STUB_CONNECT_EXIT"):
+        # A connect that fails the way the real one does: a message on stderr.
+        code = int(os.environ["TORMARCHY_STUB_CONNECT_EXIT"])
+        err = getattr(self, "_stderr", None)
+        if err is not None and hasattr(err, "streamFinished"):
+            err.setProperty("text", os.environ.get("TORMARCHY_STUB_CONNECT_ERROR", "tormarchy: tor stalled at 40% bootstrap."))
+            err.streamFinished.emit()
     if out is not None and hasattr(out, "streamFinished"):
         out.setProperty("text", text)
         out.streamFinished.emit()
-    _proc_finish(self, 0)
+    _proc_finish(self, code)
 
 
 _running_changed = Signal()
+_stdin_changed = Signal()
 Process = QmlElement(object_list("Process", props=[
     ("command", "QVariantList", []), ("environment", "QVariantMap", {}),
     ("clearEnvironment", bool, False), ("workingDirectory", str, ""),
-    ("stdout", QObject, None), ("stderr", QObject, None), ("stdinEnabled", bool, False),
+    ("stdout", QObject, None), ("stderr", QObject, None),
     ("processId", "QVariant", None)],
     signals=[("exited", int, int), "started"],
     extra={
         "runningChanged": _running_changed,
         "running": Property(bool, _proc_get_running, _proc_set_running, notify=_running_changed),
-        "startDetached": Slot()(lambda self: None),
-        "signal": Slot(int)(lambda self, s: None),
-        "write": Slot(str)(lambda self, s: None),
+        "stdinEnabledChanged": _stdin_changed,
+        "stdinEnabled": Property(bool, _proc_get_stdin, _proc_set_stdin, notify=_stdin_changed),
+        # Named explicitly: a Slot otherwise takes the function's own name, and
+        # QML would find `_proc_write`, not `write`.
+        "startDetached": Slot(name="startDetached")(lambda self: None),
+        "signal": Slot(int, name="signal")(lambda self, s: None),
+        "write": Slot(str, name="write")(_proc_write),
     }))
 
 
@@ -294,16 +368,48 @@ class IpcHandler(QObject):
     enabled = Property(bool, _get_enabled, _set_enabled, notify=enabledChanged)
 
 
+# Reads nothing unless TORMARCHY_STUB_FILES is set: the tests describe a machine
+# with no Omarchy state at all. load.py --theme sets it, with HOME pointed at a
+# theme of its own, so Omarchy's Color reads a real colors.toml.
+def _fv_get_path(self):
+    return getattr(self, "_path", "")
+
+
+def _fv_set_path(self, v):
+    if v == _fv_get_path(self):
+        return
+    self._path = v
+    self.pathChanged.emit()
+    if os.environ.get("TORMARCHY_STUB_FILES"):
+        QTimer.singleShot(0, lambda: _fv_load(self))
+
+
+def _fv_load(self):
+    try:
+        with open(_fv_get_path(self), encoding="utf-8") as f:
+            self._text = f.read()
+    except OSError:
+        self._text = ""
+        self.loadFailed.emit()
+        return
+    self.loaded.emit()
+
+
+_fv_path_changed = Signal()
 FileView = QmlElement(object_list("FileView", props=[
-    ("path", str, ""), ("watchChanges", bool, False), ("blockLoading", bool, False),
+    ("watchChanges", bool, False), ("blockLoading", bool, False),
     ("blockAllReads", bool, False), ("printErrors", bool, True), ("preload", bool, True),
     ("atomicWrites", bool, True), ("loaded_", bool, False), ("adapter", QObject, None)],
     signals=["loaded", "loadFailed", "fileChanged", "saved", "saveFailed"],
     extra={
-        "text": Slot(result=str)(lambda self: ""),
-        "reload": Slot()(lambda self: None),
-        "setText": Slot(str)(lambda self, t: None),
-        "writeAdapter": Slot()(lambda self: None),
+        "pathChanged": _fv_path_changed,
+        "path": Property(str, _fv_get_path, _fv_set_path, notify=_fv_path_changed),
+        # Named explicitly, like Process.write: a Slot otherwise takes the
+        # function's own name and QML finds no text().
+        "text": Slot(result=str, name="text")(lambda self: getattr(self, "_text", "")),
+        "reload": Slot(name="reload")(lambda self: _fv_load(self) if os.environ.get("TORMARCHY_STUB_FILES") else None),
+        "setText": Slot(str, name="setText")(lambda self, t: None),
+        "writeAdapter": Slot(name="writeAdapter")(lambda self: None),
     }))
 JsonAdapter = QmlElement(object_list("JsonAdapter"))
 

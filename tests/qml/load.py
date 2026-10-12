@@ -34,21 +34,61 @@ ap.add_argument("--status", help="JSON to answer `tormarchy status --json` with;
                                  "the helper reads as not installed")
 ap.add_argument("--bar", help="save the bar slot to this PNG")
 ap.add_argument("--panel", help="open the panel and save it to this PNG")
+ap.add_argument("--card", help="with --panel, also save just the panel itself, cropped, to this PNG")
 ap.add_argument("--foreground", default="#cdd6f4")
 ap.add_argument("--background", default="#1e1e2e")
 ap.add_argument("--settle", type=int, default=1500, help="milliseconds to run before reporting")
+ap.add_argument("--doctor", help="JSON to answer `tormarchy doctor --json` with")
+ap.add_argument("--bridges", help="JSON to answer `tormarchy bridge status --json` with")
+ap.add_argument("--bridge-check", help="JSON to answer `tormarchy bridge check` with")
+ap.add_argument("--clipboard", help="file whose contents `wl-paste` returns")
+ap.add_argument("--expand", choices=["leaks", "bridges"], help="open this tool beneath the tools band")
+ap.add_argument("--call", action="append", default=[],
+                help="after opening, call this function on the panel root, e.g. --call openLeakCheck; "
+                     "tor.<name> calls it on the service")
+ap.add_argument("--font", action="append", default=[], help="extra font file to load, e.g. a Nerd Font, so glyphs render")
+ap.add_argument("--log", action="store_true", help="print every command run and every stdin payload")
+ap.add_argument("--theme", help="an Omarchy theme directory (with colors.toml) for the shell's palette, "
+                                "e.g. <omarchy>/themes/tokyo-night")
+ap.add_argument("--font-family", default="monospace", help="the bar's font family, e.g. 'JetBrains Mono'")
+ap.add_argument("--scale", type=float, default=1.0, help="device pixel ratio for the renders, e.g. 2")
 args = ap.parse_args()
 
 shell_dir = os.path.join(os.path.abspath(os.path.expanduser(args.omarchy)), "shell")
 if not os.path.isdir(os.path.join(shell_dir, "Ui")):
     sys.exit(f"no Omarchy shell at {shell_dir} -- pass --omarchy <checkout>")
-if args.status:
-    os.environ["TORMARCHY_STUB_STATUS"] = os.path.abspath(args.status)
+for value, name in ((args.status, "TORMARCHY_STUB_STATUS"), (args.doctor, "TORMARCHY_STUB_DOCTOR"),
+                    (args.bridges, "TORMARCHY_STUB_BRIDGES"), (args.bridge_check, "TORMARCHY_STUB_BRIDGE_CHECK"),
+                    (args.clipboard, "TORMARCHY_STUB_CLIPBOARD")):
+    if value:
+        os.environ[name] = os.path.abspath(value)
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+if args.scale != 1.0:
+    os.environ["QT_SCALE_FACTOR"] = str(args.scale)
+if args.theme:
+    # A home of its own holding only the theme, where Omarchy's Color looks.
+    theme_home = tempfile.mkdtemp(prefix="tormarchy-theme-home-")
+    theme_dir = os.path.join(theme_home, ".local", "state", "omarchy", "current", "theme")
+    os.makedirs(theme_dir)
+    for name in ("colors.toml", "shell.toml"):
+        if os.path.exists(os.path.join(args.theme, name)):
+            shutil.copy(os.path.join(args.theme, name), theme_dir)
+    os.environ["HOME"] = theme_home
+    os.environ["TORMARCHY_STUB_FILES"] = "1"
+    # The few colours the host draws itself, from the same file.
+    import re
+    palette = dict(re.findall(r'^(\w+)\s*=\s*"(#[0-9a-fA-F]{6})"', open(os.path.join(args.theme, "colors.toml")).read(), re.M))
+    args.foreground = palette.get("foreground", args.foreground)
+    args.background = palette.get("background", args.background)
+    card_border, card_border_width = palette.get("accent", "#ffffff"), 2
+    urgent_color = palette.get("red", "#f38ba8")
+else:
+    card_border, card_border_width = "#40ffffff", 1
+    urgent_color = "#f38ba8"
 
-from PySide6.QtCore import QObject, QTimer, QUrl, QtMsgType, qInstallMessageHandler  # noqa: E402
-from PySide6.QtGui import QGuiApplication  # noqa: E402
+from PySide6.QtCore import QMetaObject, QObject, QTimer, QUrl, QtMsgType, qInstallMessageHandler  # noqa: E402
+from PySide6.QtGui import QFontDatabase, QGuiApplication  # noqa: E402
 from PySide6.QtQml import QQmlComponent, QQmlEngine  # noqa: E402
 # Imported for its wrappers: without it the window and items come back as bare
 # QWindow and QObject, with no grabWindow() or setParentItem().
@@ -66,6 +106,9 @@ messages = []
 qInstallMessageHandler(lambda mode, ctx, msg: messages.append((mode, msg)))
 
 app = QGuiApplication(sys.argv[:1])
+for font in args.font:
+    if QFontDatabase.addApplicationFont(os.path.abspath(font)) < 0:
+        print("note  could not load font", font)
 engine = QQmlEngine()
 engine.addImportPath(imports)
 
@@ -92,8 +135,8 @@ Window {
     foreground: "%(fg)s"
     barForeground: "%(fg)s"
     background: "%(bg)s"
-    urgent: "#f38ba8"
-    fontFamily: "monospace"
+    urgent: "%(urgent)s"
+    fontFamily: "%(family)s"
     barSize: 26
   }
 
@@ -106,16 +149,18 @@ Window {
     width: 0
     height: 0
     color: "%(bg)s"
-    border.color: Qt.rgba(1, 1, 1, 0.25)
+    border.color: "%(border)s"
+    border.width: %(borderw)d
     radius: 6
     Item { objectName: "cardContent"; anchors.fill: parent; anchors.margins: 14 }
   }
 
+  // Bar.qml's ModuleSlot: as wide and as tall as the widget says it is.
   Item {
     objectName: "slot"
     x: %(slotx)s
     y: %(sloty)s
-    height: 26
+    height: loader.item ? loader.item.implicitHeight : 0
     width: loader.item ? loader.item.implicitWidth : 0
 
     Loader {
@@ -140,7 +185,8 @@ Window {
   }
 }
 """ % {
-    "fg": args.foreground, "bg": args.background,
+    "fg": args.foreground, "bg": args.background, "family": args.font_family,
+    "urgent": urgent_color, "border": card_border, "borderw": card_border_width,
     "w": 520 if panel_mode else 200, "h": 720 if panel_mode else 40,
     "slotx": "120" if panel_mode else "Math.round((win.width - width) / 2)",
     "sloty": "10" if panel_mode else "7",
@@ -181,6 +227,17 @@ def mount_panel():
     card = win.findChild(QObject, "card")
     card.setProperty("width", keyboard_panel.property("contentWidth") + 28)
     catcher.setParentItem(win.findChild(QObject, "cardContent"))
+    if args.expand:
+        widget.setProperty("expandedTool", args.expand)
+    QTimer.singleShot(50, lambda: call_functions(widget))
+
+
+def call_functions(widget):
+    service = find(widget, "Service")
+    for name in args.call:
+        target, method = (service, name[4:]) if name.startswith("tor.") else (widget, name)
+        if target is None or not QMetaObject.invokeMethod(target, method):
+            print("note  could not call", name)
 
 
 def fit_panel():
@@ -198,20 +255,61 @@ def finish():
         app.exit(2)
 
 
+def icon_off_centre():
+    """How far the bar mark's layers sit from the slot's centre, and from each
+    other. The mark is concentric rings, so any drift between layers is the
+    lopsided icon itself, whatever the shell does with the whole."""
+    from PySide6.QtCore import QPointF
+    slot = win.findChild(QObject, "slot")
+    if slot is None or slot.width() <= 0:
+        return None
+    centre = slot.mapToScene(QPointF(slot.width() / 2, slot.height() / 2))
+    for icon in slot.findChildren(QObject):
+        if not icon.metaObject().className().startswith("TorIcon"):
+            continue
+        offsets = []
+        for layer in icon.childItems():
+            if layer.width() <= 0:
+                continue
+            c = layer.mapToScene(QPointF(layer.width() / 2, layer.height() / 2))
+            offsets.append((c.x() - centre.x(), c.y() - centre.y()))
+        if not offsets:
+            return None
+        spread = max(max(abs(a[0] - b[0]), abs(a[1] - b[1])) for a in offsets for b in offsets)
+        worst = max(max(abs(x), abs(y)) for x, y in offsets)
+        return worst, spread
+    return None
+
+
 def report():
     global failed
     if not failed and win.property("widget") is None:
         print("FAIL  Panel.qml compiled but did not instantiate")
         failed = True
+    measured = icon_off_centre() if not failed else None
+    if measured is not None:
+        worst, spread = measured
+        # Half a pixel is the shell's own: an even canvas in an odd slot puts
+        # every icon on the bar there, glyphs included.
+        if worst > 0.75 or spread > 0.01:
+            print(f"FAIL  the bar mark is off centre by {worst:.2f}px, its layers {spread:.2f}px apart")
+            failed = True
     if args.bar or args.panel:
         image = win.grabWindow()
+        # Device pixels per item pixel, so crops land where they should at --scale.
+        ratio = image.width() / max(1, win.width())
         if args.panel:
             image.save(args.panel)
             print("saved", args.panel)
+        if args.card and args.panel:
+            card = win.findChild(QObject, "card")
+            image.copy(round(card.property("x") * ratio), round(card.property("y") * ratio),
+                       round(card.property("width") * ratio), round(card.property("height") * ratio)).save(args.card)
+            print("saved", args.card)
         if args.bar:
             slot = win.findChild(QObject, "slot")
-            image.copy(int(slot.property("x")) - 10, int(slot.property("y")) - 4,
-                       int(slot.property("width")) + 20, 34).save(args.bar)
+            image.copy(round((slot.property("x") - 10) * ratio), round((slot.property("y") - 4) * ratio),
+                       round((slot.property("width") + 20) * ratio), round(34 * ratio)).save(args.bar)
             print("saved", args.bar)
 
     plugin_dir = os.path.abspath(args.plugin)
@@ -226,6 +324,11 @@ def report():
         if level == "FAIL":
             failed = True
         reported += 1
+    if args.log:
+        for argv in quickshell_stubs.COMMAND_LOG:
+            print("ran  ", argv)
+        for cmd, data in quickshell_stubs.STDIN_LOG:
+            print("stdin", repr(cmd), "<-", repr(data[:80]))
     print("result: " + ("FAIL" if failed else "ok") + f" ({reported} message(s) from the plugin)")
     shutil.rmtree(imports, ignore_errors=True)
     app.exit(1 if failed else 0)

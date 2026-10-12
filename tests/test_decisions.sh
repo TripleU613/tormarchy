@@ -40,9 +40,43 @@ echo "Privilege boundary"
 want "setup requires a terminal" tormarchy "require_terminal_root"
 want "the terminal check refuses pkexec" tormarchy 'PKEXEC_UID:-} ]] || die'
 
-# One action, one program path. More actions bought nothing and were five more
-# places to get an XML comment wrong.
-want "exactly one polkit action" etc/polkit/com.tormarchy.policy 'id="com.tormarchy.manage"'
+# The passwordless grant reaches only the subcommands that need root, never all
+# of them. One action per subcommand, pinned to it as the first argument; pkexec
+# skips an action whose argv1 does not match, and with no match at all falls
+# back to its generic action, which asks for a password and which the rule never
+# grants. An action pinned to the path with no argv1 matches every subcommand:
+# that was the whole hole, browser-exec handing out root shells.
+if python3 - <<'PY'
+import re, sys
+policy = open("etc/polkit/com.tormarchy.policy").read()
+script = open("tormarchy").read()
+allowed = re.search(r"^PKEXEC_COMMANDS=\(([^)]*)\)", script, re.M).group(1).split()
+actions = re.findall(r'<action id="([^"]+)">(.*?)</action>', policy, re.S)
+problems = []
+argv1s = []
+for action_id, body in actions:
+    path = re.search(r'exec\.path">([^<]*)<', body)
+    argv1 = re.search(r'exec\.argv1">([^<]*)<', body)
+    if not path or path.group(1) != "/usr/local/bin/tormarchy":
+        problems.append(f"{action_id}: not pinned to /usr/local/bin/tormarchy")
+    if not argv1:
+        problems.append(f"{action_id}: no exec.argv1, so it grants every subcommand")
+    else:
+        argv1s.append(argv1.group(1))
+if sorted(argv1s) != sorted(allowed):
+    problems.append(f"policy grants {sorted(argv1s)}, PKEXEC_COMMANDS lists {sorted(allowed)}")
+for forbidden in ("browser-exec", "browser", "setup", "uninstall", "boot", "menu"):
+    if forbidden in argv1s or forbidden in allowed:
+        problems.append(f"{forbidden} is reachable as root through polkit")
+if problems:
+    print("\n".join("    " + p for p in problems))
+    sys.exit(1)
+PY
+then ok "polkit grants exactly the subcommands that need root, each pinned by its first argument"
+else bad "the polkit grant reaches more than it should (above)"; fi
+want "the dispatcher refuses anything else under pkexec" tormarchy 'if [[ -n ${PKEXEC_UID:-} && " ${PKEXEC_COMMANDS[*]} " != *" $command "* ]]; then'
+want "browser-exec never runs as root" tormarchy '(( EUID != 0 )) || die "browser-exec never runs as root"'
+want "nor does a browser launch" tormarchy '(( EUID != 0 )) || die "launch the browser as yourself, not as root"'
 
 # A double hyphen inside an XML comment makes the whole document unparseable,
 # polkitd registers nothing, and pkexec falls back to prompting with no
@@ -80,6 +114,12 @@ want "onion range is dropped in the filter chain" tormarchy 'ip daddr $VIRT_NET 
 want "forward traffic is dropped" tormarchy "hook forward priority filter; policy drop"
 want "invalid conntrack state is dropped" tormarchy "ct state invalid drop"
 want "IPv6 is dropped explicitly" tormarchy "meta nfproto ipv6 drop"
+
+# Switching on moves the machine only onto a route already proven to carry
+# traffic. Without it the switch lands on circuits still being built, and
+# everything on the machine waits on them: the big drop.
+if awk '/^cmd_connect\(\) \{/ { inside = 1 } inside && /find_route \|\|/ { found = NR } inside && /apply_rules "\$mode"/ { applied = NR } inside && /^}/ { exit } END { exit !(found && applied && found < applied) }' tormarchy
+then ok "connect proves a route before any rule goes on"; else bad "connect applies rules without proving a route first"; fi
 
 # Rules go on only after a full bootstrap. Applying them earlier redirects
 # everything into a daemon that cannot carry it, which looks exactly like a dead
@@ -193,7 +233,7 @@ want "stale status reads are dropped" Service.qml "root._statusEpoch !== root._a
 
 # The toggle's busy state is action-only. Folding the routine status poll in made
 # the switch flash and refuse clicks on every refresh.
-want "busy tracks actions, not the status poll" Service.qml "readonly property bool busy: actionProcess.running"
+want "busy tracks actions, not the status poll" Service.qml "readonly property bool busy: (!!actionProcess && actionProcess.running)"
 
 # A connect waits up to two minutes for bootstrap, and the switch used to refuse
 # every click for all of it. Switching off during that wait cancels instead.
@@ -221,10 +261,17 @@ bare=$(awk '
 ' ./*.qml)
 if [[ -z $bare ]]; then ok "no bare Color. in any QML file"; else bad "bare Color. (use Commons.Color):"; printf '        %s\n' "$bare"; fi
 
-# ShellIpc, as every first-party panel uses, so omarchy-shell can reach the
-# handler over the shell's own socket.
-want "the panel's IPC goes through ShellIpc" Panel.qml "ShellIpc {"
-reject "no bare IpcHandler in the panel" Panel.qml "IpcHandler {"
+# Quickshell's IpcHandler, never Omarchy's ShellIpc. ShellIpc is newer than the
+# latest Omarchy release, and a widget naming a type its shell lacks is left out
+# of the bar without a word -- which is what 1.2.0 did on every released shell.
+want "the panel's IPC is a plain IpcHandler" Panel.qml "IpcHandler {"
+reject "no ShellIpc, which released Omarchy does not have" Panel.qml "ShellIpc {"
+
+# The bar mark centres every layer on the box it is given. Omarchy 4.0.x
+# stretches a custom icon over its whole canvas, and layers placed against
+# their own size drifted into the top-left corner of the stretched box.
+reject "no layer of the mark is placed against its own size" TorIcon.qml "(root.size - width) / 2"
+want "the size falls back where the shell has no bar icon size" Panel.qml "Style.bar.iconSize || "
 
 # A third-party plugin's shell facade only summons the plugin's own id. The
 # speed test summon was always refused, after closing the panel first.
@@ -261,6 +308,118 @@ want "publishing reads tor's own cookie" tormarchy 'for candidate in "${TOR_COOK
 # Loopback v6 stays up, and the pre-connect state is saved once only.
 want "loopback IPv6 stays up while connected" tormarchy "printf '0' >\"\$IPV6_CONF/lo/disable_ipv6\""
 want "the IPv6 state is saved once per connection" tormarchy 'if [[ ! -e $IPV6_STATE_FILE ]]; then'
+
+echo
+echo "Panel tools"
+
+# Omarchy's rule is its own sender, never raw notify-send: the sender is what
+# applies the user's notification settings, do-not-disturb included.
+want "toasts go through omarchy-notification-send" Model.js '["omarchy-notification-send",'
+for f in Panel.qml Service.qml Model.js; do
+  reject "no raw notify-send in $f" "$f" '"notify-send"'
+done
+
+# The leak check makes real requests -- check.torproject.org, a direct IPv6
+# probe -- so it runs when asked and never on a schedule, like the latency
+# gauge's rule. A Timer that so much as mentions it is the start of a beacon.
+if python3 - <<'PY'
+import re, sys
+for name in ("Panel.qml", "Service.qml"):
+    src = open(name).read()
+    for m in re.finditer(r"\bTimer\s*\{", src):
+        depth, i = 0, m.end() - 1
+        while True:
+            depth += {"{": 1, "}": -1}.get(src[i], 0)
+            if depth == 0:
+                break
+            i += 1
+        if re.search(r"checkLeaks|doctorProcess|doctor", src[m.start():i]):
+            sys.exit(1)
+PY
+then ok "no Timer runs the leak check"; else bad "a Timer runs the leak check"; fi
+
+# Bridge lines are what a bridge exists to hide. argv is world-readable in
+# /proc, so they go to tormarchy over stdin and nowhere else: never a command
+# line, never a file the root helper is pointed at.
+want "bridge check takes no arguments" Service.qml '["bash", "-c", "exec tormarchy bridge check"]'
+want "bridge set takes no arguments" Service.qml '["bash", "-c", "exec tormarchy bridge set"]'
+want_next "bridge set's stdin is closed after the lines, which is its end of input" Service.qml \
+  'bridgeSetProcess.write(root._pendingBridgeText' 'bridgeSetProcess.stdinEnabled = false'
+want_next "so is bridge check's" Service.qml \
+  'bridgeCheckProcess.write(root._pendingBridgeText' 'bridgeCheckProcess.stdinEnabled = false'
+if python3 - <<'PY'
+import re, sys
+src = open("Service.qml").read()
+uses = [l.strip() for l in src.splitlines() if "_pendingBridgeText" in l]
+allowed = re.compile(r"^(property string _pendingBridgeText: \"\"|_pendingBridgeText = \"\"|root\._pendingBridgeText = (\"\"|text)"
+                     r"|if \(bridgeWorking \|\| busy \|\| _pendingBridgeText === \"\"\) return"
+                     r"|bridge(Set|Check)Process\.write\(root\._pendingBridgeText \+ \"\\n\"\))$")
+bad = [u for u in uses if not allowed.match(u)]
+if bad:
+    print("\n".join("    " + b for b in bad))
+    sys.exit(1)
+PY
+then ok "the pasted text is only stored, cleared, and written to stdin"
+else bad "the pasted text is used somewhere other than stdin (see above)"; fi
+reject "the root helper takes no bridge file argument" tormarchy 'bridge set <file'
+want "the panel-readable summary is counts only" tormarchy 'bridge_counts "$BRIDGE_STASH" >"$staging"'
+want "setup brings an older bridge stash within the panel's reach" tormarchy 'chmod 0711 "$(dirname "$BRIDGE_STASH")"'
+
+# A bare exec applies its redirections to the whole process: one with
+# 2>/dev/null on it silences every later error message, die included.
+if grep -nE '^[[:space:]]*exec [0-9]+[<>&][^;]*2>/dev/null' tormarchy; then
+  bad "a bare exec redirects stderr for the rest of the process (above)"
+else
+  ok "no bare exec swallows stderr for the rest of the process"
+fi
+
+echo
+echo "The Omarchy menu"
+
+# The menu file is the user's, so it is written as the user: root writing into a
+# home directory follows whatever symlinks are there. sudo tormarchy menu add
+# goes to the person behind sudo, never to root's own home.
+want "menu edits run as the user, through runuser" tormarchy 'runuser -u "$user" -- env HOME="$home" "$SELF" menu "$verb"'
+want "and refuse to run as root for themselves" tormarchy 'die "run this as yourself, not as root"'
+# A file that does not parse already costs its owner every entry; one this made
+# unparseable would be worse. Checked before and after, and left alone if not.
+want "a file that does not parse is left alone" tormarchy 'does not parse as it is; fix it first, nothing was changed'
+want "and nothing is written that would not parse" tormarchy 'the menu would not parse after the change, so nothing was changed'
+want "uninstall takes the rows out" tormarchy 'menu_as_user "$SUDO_USER" remove'
+
+# The marketplace's security scan reads a script that downloads (curl) and also
+# runs an interpreter as one that may run what it fetched, and blocks it. A perl
+# one-liner to parse the menu file was enough to turn the verdict to
+# needs-fixes; sed -z does the same job without being an interpreter.
+for interpreter in perl python3 ruby node; do
+  if grep -qE "(^|[[:space:];|&(])$interpreter[[:space:]]" tormarchy; then
+    bad "tormarchy runs $interpreter, which the marketplace scan treats as running a download"
+  else
+    ok "tormarchy runs no $interpreter"
+  fi
+done
+
+echo
+echo "Panel copy"
+
+# Labels on the panel, never sentences: anything that explains or instructs is
+# a hover bubble. So a string longer than a label may only appear where it is
+# given to a tooltip.
+if python3 - <<'PY'
+import re, sys
+bad = []
+for n, line in enumerate(open("Panel.qml"), 1):
+    for text in re.findall(r'qsTr\("((?:[^"\\]|\\.)*)"\)', line):
+        if len(text) > 32 and not re.search(r"\b(tip|tooltipText)\s*:|wrapTip\(", line):
+            bad.append(f"    Panel.qml:{n}: {text}")
+if bad:
+    print("\n".join(bad))
+    sys.exit(1)
+PY
+then ok "no string on the panel is longer than a label, unless it is a bubble's"
+else bad "a sentence is on the panel itself (above); put it in a tooltip"; fi
+want "messages from the helper are shown cut to one line" Panel.qml "component Brief: Text {"
+want "and wrapped for their bubble, which draws one line however long" Panel.qml "text: Model.wrapTip(brief.full)"
 
 echo
 if (( failures == 0 )); then

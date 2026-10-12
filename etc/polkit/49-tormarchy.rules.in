@@ -22,9 +22,15 @@
 // defaults in com.tormarchy.policy, so other accounts and remote sessions
 // still authenticate.
 //
+// What it grants is only the actions com.tormarchy.policy defines: one per
+// subcommand that needs root, each pinned to that subcommand. Nothing here can
+// widen that -- a subcommand with no action of its own gets pkexec's generic
+// action, which this rule does not match, and which asks for a password.
+//
 // The cost of a promptless toggle: code already running as you can flip these
-// without asking, including tormarchy-disconnect, which drops protection
-// silently. Delete this file to be asked every time instead.
+// without asking, including disconnect, which drops protection silently. None
+// of them runs anything its caller chooses. Delete this file to be asked every
+// time instead.
 
 polkit.addRule(function(action, subject) {
   // indexOf, not startsWith: polkit's JS engine is not a browser engine.

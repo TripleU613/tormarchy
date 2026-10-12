@@ -20,7 +20,7 @@ skipped otherwise, and it's the part that matters most.
 | `Model.js` | Parsing and formatting. No Qt in here, so it's testable with `node`. |
 | `TorIcon` / `TorWordmark` / `SpeedGauge` | Drawn in QML, no image files. |
 | `etc/` | What `setup` installs: torrc snippet, polkit policy and rule, tmpfiles. |
-| `tests/` | Pinned decisions, helper behaviour, Model.js, and the Qt load check. |
+| `tests/` | Pinned decisions, helper behaviour, Model.js, the Qt load check and the Service scenarios. |
 
 ## Working on it
 
@@ -56,7 +56,22 @@ python3 tests/qml/load.py --omarchy ~/src/omarchy \
 ```
 
 The fixtures stand in for `tormarchy status --json` in each state, and
-`--bar`/`--panel` save what the bar icon and the open panel look like.
+`--bar`/`--panel` save what the bar icon and the open panel look like. Others
+answer the panel's tools — `--doctor`, `--bridges`, `--bridge-check`,
+`--clipboard` — and `--expand leaks|bridges` with `--call tor.checkLeaks` (or
+any Service or panel function) opens and drives one. `--font` loads a Nerd Font
+so the glyphs render, `--log` prints every command the plugin ran and every
+byte it wrote to a stdin.
+
+`tests/qml/scenarios.py` drives the Service through sequences of states: that a
+tor restart is not mistaken for the kill switch, that each notification fires
+once and replaces the last, that bridge lines reach `tormarchy` over stdin and
+never appear on a command line. `.github/scripts/shell.sh` runs all of it, in
+every state, and CI runs that weekly against the current Omarchy and Qt:
+
+```bash
+OMARCHY_PATH=~/src/omarchy PYTHON=~/venvs/qt/bin/python make shell
+```
 
 Read palette colours through the alias, `import qs.Commons as Commons` then
 `Commons.Color.foreground`. Qt 6.12 has a `Color` of its own, and a bare
@@ -77,8 +92,36 @@ forwarded traffic bypassing the output hook entirely. If you reorder rules and
 one of those fails, it is not the test being fussy.
 
 `tests/test_helpers.sh` runs the script's own functions with the machine stubbed
-out — IPv6 save and restore, the boot marker, circuit selection, the status
-JSON. The IPv6 cases need root and skip themselves without it.
+out — IPv6 save and restore, the boot marker, circuit selection and relay
+details, exit exclusions, bridge parsing, the doctor and status JSON. The IPv6
+and bridge-summary cases need root and skip themselves without it.
+
+`tests/kernel/killswitch.sh` puts the real ruleset on in a network namespace and
+proves, in a real kernel, that nothing reaches the wire and that a connection
+open before the switch fails at once. `check.sh` runs it when it has root and
+namespaces; elsewhere it skips.
+
+`tests/menu.js` checks Tor's rows in the Omarchy menu with the menu's own parser,
+from the Omarchy checkout you give it: `node tests/menu.js ~/src/omarchy`.
+`shell.sh` runs it against every checkout it is given.
+
+## Screenshots
+
+The README's pictures and `preview.png`, the marketplace card, are rendered from
+the QML rather than taken by hand, so they show what the code draws, in
+Omarchy's default theme and font. After changing the panel:
+
+```bash
+OMARCHY_PATH=~/src/omarchy make screenshots
+```
+
+## If you touch the panel's tools
+
+The leak check makes real requests, so it runs when asked and never from a
+`Timer`. Bridge lines go to `tormarchy` over stdin only — never argv, which any
+process can read in `/proc`, and never a path the root helper is handed.
+Notifications go through `omarchy-notification-send`, never `notify-send`.
+`tests/test_decisions.sh` fails if any of those change.
 
 Rules only ever go on after Tor reports a full bootstrap, and nothing is
 persisted to `/etc/nftables.conf`, so a reboot always restores normal

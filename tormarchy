@@ -39,7 +39,14 @@ SELF=$(readlink -f "${BASH_SOURCE[0]}")
 # re-exec this exact invocation after escalating.
 ARGV=("$@")
 
+
 # ---------------------------------------------------------------- constants --
+# The subcommands that may run as root through polkit -- the passwordless grant
+# setup installs for the toggle -- and nothing else. etc/polkit/com.tormarchy.policy
+# has one action per entry here, each pinned to it as the first argument, and
+# the dispatcher refuses anything else under pkexec as well. Each takes only
+# validated values; none runs anything its caller names.
+PKEXEC_COMMANDS=(connect disconnect mode exit bridge panic browser-lock)
 
 TOR_USER="tor"
 TRANS_PORT=9040
@@ -74,9 +81,16 @@ TORRC="/etc/tor/torrc"
 TORRC_DIR="/etc/tor/torrc.d"
 TORRC_BASE="$TORRC_DIR/00-tormarchy.conf"
 TORRC_EXIT="$TORRC_DIR/10-tormarchy-exit.conf"
+TORRC_EXCLUDE="$TORRC_DIR/11-tormarchy-exclude.conf"
 TORRC_BRIDGES="$TORRC_DIR/20-tormarchy-bridges.conf"
 
 BRIDGE_STASH="/etc/tormarchy/bridges.stash"
+# What the stash holds, without the lines themselves: transport names and
+# counts, readable by the panel. The stash and the live bridge config are 0600
+# root, and which bridges you use is what a bridge exists to hide.
+BRIDGE_SUMMARY="/etc/tormarchy/bridges.summary"
+# More than any real set of bridge lines; past it, input is not bridge lines.
+BRIDGE_INPUT_BYTE_LIMIT=65536
 
 # Survives a reboot, unlike everything in /run. Only written when the boot
 # receiver is enabled, so a machine that never opted in has nothing to resume.
@@ -324,13 +338,17 @@ tor_control() {
     cookie=$(od -An -tx1 -v "$candidate" 2>/dev/null | tr -d ' \n')
     [[ -n $cookie ]] || continue
 
-    exec 3<>"/dev/tcp/127.0.0.1/$CONTROL_PORT" 2>/dev/null || return 1
+    # The 2>/dev/null on the group, not on the exec. A bare exec applies every
+    # redirection to the whole process, so `exec 3<>... 2>/dev/null` silenced
+    # stderr for good after the first control-port call: a connect that then
+    # failed died without a word, and the panel could only say it had failed.
+    { exec 3<>"/dev/tcp/127.0.0.1/$CONTROL_PORT"; } 2>/dev/null || return 1
 
     printf 'AUTHENTICATE %s\r\n' "$cookie" >&3
     if ! IFS= read -r -t 3 reply <&3 || [[ $reply != 250* ]]; then
       # tor closes the session after a failed AUTHENTICATE, so the next
       # cookie gets a connection of its own.
-      exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
+      { exec 3<&- 3>&-; } 2>/dev/null
       continue
     fi
 
@@ -345,7 +363,7 @@ tor_control() {
     # as no answer.
     timeout "${TOR_CONTROL_TIMEOUT:-5}" head -c "$CONTROL_REPLY_BYTE_LIMIT" <&3
     status=$?
-    exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
+    { exec 3<&- 3>&-; } 2>/dev/null
     return $status
   done
   return 1
@@ -371,8 +389,14 @@ bootstrap_progress() {
   printf '%s' "$(cut -f1 <<<"$vitals")"
 }
 
-# The full path of the newest general circuit, as country codes:
-# "<id>\t<age>\t<exit-ip>\t<cc>,<cc>,<cc>"
+# The full path of the newest general circuit, as country codes, then what the
+# consensus says about each relay:
+# "<id>\t<age>\t<exit-ip>\t<cc>,<cc>,<cc>\t<nick>/<flags>/<kbps>,..."
+#
+# Flags are space-separated and limited to the ones worth showing; bandwidth is
+# the consensus weight's figure, in kilobytes per second. Nicknames are
+# [A-Za-z0-9]{1,19} by the directory spec, so neither "/" nor "," can occur in
+# a field.
 #
 # Resolving costs a fingerprint lookup and a GeoIP lookup per hop, so the answer
 # is cached against the circuit id: a path only changes when the circuit does.
@@ -425,11 +449,13 @@ circuit_path() {
     (( age < 0 )) && age=0
   fi
 
-  local cached_line cached_id cached_ip cached_ccs
+  # "v2" marks the layout that carries relay details. A line from before it has
+  # the circuit id in that place, so it simply misses and is rebuilt.
+  local cached_line cached_version cached_id cached_ip cached_ccs cached_relays
   if [[ -n $cache ]] && cached_line=$(read_cache_line "$cache"); then
-    IFS=$'\t' read -r cached_id cached_ip cached_ccs <<<"$cached_line"
-    if [[ $cached_id == "$id" && -n $cached_ccs ]]; then
-      printf '%s\t%s\t%s\t%s' "$id" "$age" "$cached_ip" "$cached_ccs"
+    IFS=$'\t' read -r cached_version cached_id cached_ip cached_ccs cached_relays <<<"$cached_line"
+    if [[ $cached_version == v2 && $cached_id == "$id" && -n $cached_ccs ]]; then
+      printf '%s\t%s\t%s\t%s\t%s' "$id" "$age" "$cached_ip" "$cached_ccs" "$cached_relays"
       return 0
     fi
   fi
@@ -446,11 +472,32 @@ circuit_path() {
 
   # One session for every fingerprint. Each ns/id reply carries a single "r "
   # line and replies arrive in request order, so addresses line up with hops.
-  local -a queries=() ips=()
-  local fp ns geo ip cc ccs=""
+  # The "s" and "w" lines after each "r" belong to that relay.
+  local -a queries=() ips=() relays=()
+  local fp ns geo ip cc ccs="" relay relay_ip details=""
   for fp in "${fps[@]}"; do queries+=("GETINFO ns/id/\$$fp"); done
   ns=$(tor_control "${queries[@]}" 2>/dev/null) || return 1
-  mapfile -t ips < <(awk '/^r /{print $7}' <<<"$ns")
+  mapfile -t relays < <(awk '
+    function flush() {
+      if (ip != "") print ip "\t" nick "/" flags "/" (bw == "" ? 0 : bw)
+      ip = ""; nick = ""; flags = ""; bw = ""
+    }
+    { sub(/\r$/, "") }
+    /^r / { flush(); nick = $2; ip = $7; next }
+    /^s / {
+      for (i = 2; i <= NF; i++)
+        if ($i ~ /^(Guard|Exit|Fast|Stable)$/) flags = flags (flags == "" ? "" : " ") $i
+      next
+    }
+    /^w / { if (match($0, /Bandwidth=[0-9]+/)) bw = substr($0, RSTART + 10, RLENGTH - 10); next }
+    END { flush() }
+  ' <<<"$ns")
+  for relay in "${relays[@]}"; do
+    IFS=$'\t' read -r relay_ip relay <<<"$relay"
+    [[ $relay =~ ^[A-Za-z0-9]{0,19}/[A-Za-z\ ]*/[0-9]+$ ]] || relay="//0"
+    ips+=("$relay_ip")
+    details+="${details:+,}$relay"
+  done
 
   # Every hop must resolve, or nothing is reported. A partial answer rendered as
   # a complete path is worse than no answer: two hops shown as the whole circuit
@@ -473,9 +520,9 @@ circuit_path() {
   if [[ -n $cache ]]; then
     # Best effort: the cache is an optimisation, and failing to store it must
     # not fail a lookup that already succeeded.
-    write_cache "$cache" "$id"$'\t'"$exit_ip"$'\t'"$ccs" || true
+    write_cache "$cache" "v2"$'\t'"$id"$'\t'"$exit_ip"$'\t'"$ccs"$'\t'"$details" || true
   fi
-  printf '%s\t%s\t%s\t%s' "$id" "$age" "$exit_ip" "$ccs"
+  printf '%s\t%s\t%s\t%s\t%s' "$id" "$age" "$exit_ip" "$ccs" "$details"
 }
 
 # Programs holding a live connection to something outside this machine.
@@ -585,7 +632,14 @@ $lan_nat
 
 $lan_filter
 
-    # Everything else: UDP, QUIC, ICMP, mDNS, NTP. This is the kill switch.
+    # Everything else: UDP, QUIC, ICMP, mDNS, NTP, and any connection opened
+    # before the rules went on. This is the kill switch.
+    #
+    # Dropped, and an app is not left hanging for it: a packet this machine
+    # sends that is dropped here fails the sender at once -- a reset on a TCP
+    # stream from before the switch, EPERM on UDP -- so a stream or a QUIC
+    # session gives up immediately and reconnects, through Tor. Measured, not
+    # assumed: a reject here behaved identically, so the simpler rule stays.
     counter drop
   }
 
@@ -765,7 +819,7 @@ cmd_status() {
   rules_present && connected=true
 
   local mode bootstrap=0 exit_cc="" exit_ip="" circuit_age=0
-  local bytes_read=0 bytes_written=0 path_ccs="" vitals info
+  local bytes_read=0 bytes_written=0 path_ccs="" relay_details="" vitals info
   mode=$(current_mode)
   [[ -z $mode ]] && $connected && mode="lan"
 
@@ -782,14 +836,14 @@ cmd_status() {
     fi
     if [[ ${bootstrap:-0} -ge 100 ]] && info=$(circuit_path); then
       local _id
-      IFS=$'\t' read -r _id circuit_age exit_ip path_ccs <<<"$info"
+      IFS=$'\t' read -r _id circuit_age exit_ip path_ccs relay_details <<<"$info"
       exit_cc=${path_ccs##*,}
       [[ $exit_cc == xx ]] && exit_cc=""
     fi
   fi
 
-  local requested_exit=""
-  [[ -r $TORRC_EXIT ]] && requested_exit=$(sed -n 's/^[[:space:]]*ExitNodes[[:space:]]*{\([a-zA-Z]\{2\}\)}.*/\1/p' "$TORRC_EXIT" | head -1)
+  local requested_exit
+  requested_exit=$(requested_exit)
 
   # The one inconsistency worth shouting about: rules on, no Tor behind them.
   # Traffic is not leaking, it is going nowhere -- but the user needs to know
@@ -827,15 +881,31 @@ cmd_status() {
     return 0
   fi
 
-  local path_json="" hop warnings_json=""
+  local path_json="" hops_json="" hop warnings_json="" excluded_json=""
   if [[ -n $path_ccs ]]; then
-    local -a hops
+    local -a hops relays=()
     IFS=',' read -ra hops <<<"$path_ccs"
-    for hop in "${hops[@]}"; do
+    [[ -n $relay_details ]] && IFS=',' read -ra relays <<<"$relay_details"
+    local i nick flags kbps flag flags_json
+    local -a flag_list
+    for i in "${!hops[@]}"; do
+      hop=${hops[i]}
       [[ -n $path_json ]] && path_json+=","
       path_json+="\"$(json_escape "$hop")\""
+      IFS='/' read -r nick flags kbps <<<"${relays[i]:-}"
+      [[ $kbps =~ ^[0-9]+$ ]] || kbps=0
+      # read -a rather than an unquoted expansion, which would also glob.
+      read -ra flag_list <<<"$flags"
+      flags_json=""
+      for flag in ${flag_list+"${flag_list[@]}"}; do flags_json+="${flags_json:+,}\"$(json_escape "$flag")\""; done
+      [[ -n $hops_json ]] && hops_json+=","
+      hops_json+="{\"cc\":\"$(json_escape "$hop")\",\"nickname\":\"$(json_escape "$nick")\",\"flags\":[$flags_json],\"bandwidthKBps\":$kbps}"
     done
   fi
+  local excluded
+  while IFS= read -r excluded; do
+    [[ -n $excluded ]] && excluded_json+="${excluded_json:+,}\"$(json_escape "$excluded")\""
+  done < <(excluded_exits)
   local warning
   for warning in ${warnings+"${warnings[@]}"}; do
     [[ -n $warnings_json ]] && warnings_json+=","
@@ -849,12 +919,15 @@ cmd_status() {
   "connected": $connected,
   "bootstrap": ${bootstrap:-0},
   "controlPort": $control_port,
+  "bridges": "$(bridge_state)",
   "mode": "$(json_escape "$mode")",
   "exitIp": "$(json_escape "$exit_ip")",
   "exitCountry": "$(json_escape "$exit_cc")",
   "requestedExit": "$(json_escape "$requested_exit")",
+  "excludedExits": [$excluded_json],
   "circuitAgeSec": ${circuit_age:-0},
   "path": [$path_json],
+  "hops": [$hops_json],
   "bytesRead": ${bytes_read:-0},
   "bytesWritten": ${bytes_written:-0},
   "statusText": "$(json_escape "$status_text")",
@@ -875,6 +948,84 @@ wait_bootstrap() {
     sleep 1
   done
   printf '%s' "$pct"
+}
+
+# Tor reports a circuit it could use, the step after bootstrap: until then a
+# request has nothing to ride on.
+wait_circuit() {
+  local deadline=$(( $(date +%s) + ${1:-20} )) reply
+  while (( $(date +%s) < deadline )); do
+    tor_is_running || return 1
+    reply=$(tor_control 'GETINFO status/circuit-established' 2>/dev/null) || reply=""
+    [[ $reply == *"circuit-established=1"* ]] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# One lookup through tor's DNSPort, which is where every app's first request
+# goes the moment the rules are on. Tor gives each listening port circuits of its
+# own, so a fetch through the SOCKS port alone says nothing about this one.
+# A hand-built query on bash's own UDP socket: check.torproject.org, A record,
+# answered NOERROR under the same id.
+dns_probe() {
+  local query='\x7e\x51\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x05check\x0atorproject\x03org\x00\x00\x01\x00\x01'
+  local reply
+  { exec 4<>"/dev/udp/127.0.0.1/$DNS_PORT"; } 2>/dev/null || return 1
+  printf '%b' "$query" >&4
+  reply=$(timeout "$ROUTE_PROBE_TIMEOUT" head -c 4 <&4 2>/dev/null | od -An -tx1 | tr -d ' \n')
+  { exec 4<&-; } 2>/dev/null
+  # id 7e51, a response (top bit of byte 3), rcode 0 (low nibble of byte 4).
+  [[ $reply =~ ^7e51([0-9a-f]{2})([0-9a-f]{2})$ ]] || return 1
+  (( 16#${BASH_REMATCH[1]} & 0x80 )) && (( (16#${BASH_REMATCH[2]} & 0x0f) == 0 ))
+}
+
+# One real round trip through Tor, in milliseconds. Fails if nothing answered.
+route_probe_ms() {
+  local target=$1 seconds
+  seconds=$(curl -sf -o /dev/null -w '%{time_total}' -m "$ROUTE_PROBE_TIMEOUT" \
+    --socks5-hostname "127.0.0.1:$SOCKS_PORT" "$target" 2>/dev/null) || return 1
+  awk -v t="$seconds" 'BEGIN { printf "%d", t * 1000 }'
+}
+
+# Bootstrapped is not the same as carrying traffic. Before any rule goes on,
+# fetch something real through Tor and time it; if nothing answers, or the
+# answer is slow, ask for fresh circuits and try again. Moving the machine onto
+# a route that is dead or crawling is the network drop -- everything waits on
+# it -- where moving onto one already proven is a blip. The fetch also warms
+# tor's predicted ports: it keeps clean circuits ready for 443, so the traffic
+# that arrives the moment the rules do has one waiting.
+ROUTE_GOOD_MS=3500
+ROUTE_ATTEMPTS=3
+ROUTE_PROBE_TIMEOUT=15
+
+find_route() {
+  local attempt ms best="" target
+  wait_circuit 20 || true
+  for (( attempt = 0; attempt < ROUTE_ATTEMPTS; attempt++ )); do
+    cancelled_unless_running
+    # A different host each try, so one site being down is not "no route".
+    target=${SPEED_TARGETS[attempt % ${#SPEED_TARGETS[@]}]}
+    if ! dns_probe; then
+      echo "No answer from Tor's resolver yet; trying another route..."
+    elif ms=$(route_probe_ms "$target"); then
+      if [[ -z $best ]] || (( ms < best )); then best=$ms; fi
+      if (( ms <= ROUTE_GOOD_MS )); then
+        echo "Route found (${ms} ms)."
+        return 0
+      fi
+      echo "Route is slow (${ms} ms); trying another..."
+    else
+      echo "Nothing answered through Tor yet; trying another route..."
+    fi
+    if (( attempt + 1 < ROUTE_ATTEMPTS )); then
+      tor_control 'SIGNAL NEWNYM' >/dev/null 2>&1 || true
+      sleep 2
+    fi
+  done
+  # Slow is still a working route, and better than not connecting at all.
+  [[ -n $best ]] || return 1
+  echo "Using the fastest route found (${best} ms)."
 }
 
 # A disconnect that ran while connect was waiting stops tor. Nothing more to do
@@ -998,6 +1149,10 @@ NOTE
     die "tor stalled at ${pct}% bootstrap. $hint"
   fi
 
+  # The network is still the machine's own until this has a route that works.
+  echo "Finding a route..."
+  find_route || die "nothing got through Tor in $ROUTE_ATTEMPTS tries. No rules applied, networking is unchanged."
+
   take_lock
   # Checked again under the lock: a disconnect that got in between the wait
   # and here has stopped tor, and rules applied now would shut the network
@@ -1096,8 +1251,91 @@ cmd_newnym() {
   echo "New circuit requested."
 }
 
+# The country exits are pinned to, or nothing.
+requested_exit() {
+  [[ -r $TORRC_EXIT ]] || return 0
+  sed -n 's/^[[:space:]]*ExitNodes[[:space:]]*{\([a-zA-Z]\{2\}\)}.*/\1/p' "$TORRC_EXIT" | head -1 | tr 'A-Z' 'a-z'
+}
+
+# Countries exits must never be in, one per line.
+excluded_exits() {
+  [[ -r $TORRC_EXCLUDE ]] || return 0
+  sed -n 's/^[[:space:]]*ExcludeExitNodes[[:space:]]*//p' "$TORRC_EXCLUDE" | head -1 \
+    | tr ',' '\n' | sed -n 's/^[[:space:]]*{\([a-zA-Z]\{2\}\)}[[:space:]]*$/\1/p' | tr 'A-Z' 'a-z'
+}
+
+# After a change to which exits are allowed.
+reload_for_exit_change() {
+  tor_is_running || return 0
+  systemctl reload tor.service 2>/dev/null || systemctl restart tor.service \
+    || die "wrote the config but could not reload tor"
+  publish_cookie || true
+  # A reload changes which exits new circuits may use, but the circuit
+  # already carrying traffic keeps its old exit until it ages out -- up to
+  # ten minutes of the panel saying one country and the traffic leaving from
+  # another. NEWNYM moves new streams onto a circuit built under the new rule.
+  tor_control 'SIGNAL NEWNYM' >/dev/null 2>&1 || true
+}
+
+# `exit --exclude de,us` / `exit --exclude none`. The opposite of pinning: Tor
+# still chooses, from everywhere but these. Unlike a pin it barely narrows the
+# pool, so it is the better tool for "anywhere but there".
+exit_exclude() {
+  local spec="${1:-}" cc
+  [[ -n $spec ]] || die "expected country codes, e.g. 'tormarchy exit --exclude de,us', or 'none'"
+  local -a codes=() parts=()
+  if [[ $spec != none ]]; then
+    IFS=',' read -ra parts <<<"$spec"
+    for cc in "${parts[@]}"; do
+      cc=${cc//[[:space:]]/}
+      [[ $cc =~ ^[A-Za-z][A-Za-z]$ ]] || die "not a two-letter country code: $cc"
+      cc=${cc,,}
+      [[ " ${codes[*]} " == *" $cc "* ]] || codes+=("$cc")
+    done
+    (( ${#codes[@]} > 0 )) || die "expected country codes, e.g. 'tormarchy exit --exclude de,us', or 'none'"
+    (( ${#codes[@]} <= 32 )) || die "too many countries; exclude at most 32"
+  fi
+
+  require_root
+  [[ -d $TORRC_DIR ]] || die "$TORRC_DIR is missing -- run setup first"
+
+  # Pinned to a country and excluding it leaves no exit at all, and tor fails
+  # in a way that looks like the network is down.
+  local pinned
+  pinned=$(requested_exit)
+  if [[ -n $pinned && " ${codes[*]} " == *" $pinned "* ]]; then
+    die "exits are pinned to ${pinned^^}, so it cannot also be excluded. Run 'tormarchy exit auto' first."
+  fi
+
+  if (( ${#codes[@]} == 0 )); then
+    rm -f "$TORRC_EXCLUDE"
+  else
+    local list=""
+    for cc in "${codes[@]}"; do list+="${list:+,}{$cc}"; done
+    cat >"$TORRC_EXCLUDE" <<CONF
+# Managed by tormarchy. Remove this file or run 'tormarchy exit --exclude none'.
+ExcludeExitNodes $list
+CONF
+    chmod 0644 "$TORRC_EXCLUDE"
+  fi
+
+  reload_for_exit_change
+
+  if (( ${#codes[@]} == 0 )); then
+    echo "No countries excluded. Tor may exit anywhere."
+  else
+    local shown="${codes[*]}"
+    echo "Exits will never be in ${shown^^}. New circuits follow the rule."
+  fi
+}
+
 cmd_exit() {
   local target="${1:-}"
+
+  if [[ $target == --exclude ]]; then
+    exit_exclude "${2:-}"
+    return
+  fi
 
   if [[ $target == --list ]]; then
     tor_is_running || die "tor is not running"
@@ -1115,15 +1353,23 @@ cmd_exit() {
     # Chunked rather than one giant pipeline: replies are only read after every
     # command is written, so thousands in one session would fill the socket
     # buffer in both directions and deadlock against tor.
+    #
+    # One bare country code per line, each once. The replies themselves are
+    # "250-ip-to-country/<ip>=<cc>", and printing those raw left the panel's
+    # picker -- which keeps only two-letter lines -- with nothing to offer.
     local -a queries=()
     local ip
-    for ip in "${ips[@]}"; do
-      queries+=("GETINFO ip-to-country/$ip")
-      if (( ${#queries[@]} >= 200 )); then
-        tor_control "${queries[@]}"; queries=()
-      fi
-    done
-    (( ${#queries[@]} > 0 )) && tor_control "${queries[@]}"
+    {
+      for ip in "${ips[@]}"; do
+        queries+=("GETINFO ip-to-country/$ip")
+        if (( ${#queries[@]} >= 200 )); then
+          tor_control "${queries[@]}"; queries=()
+        fi
+      done
+      (( ${#queries[@]} > 0 )) && tor_control "${queries[@]}"
+    } | tr -d '\r' \
+      | sed -n 's/^250[-+]ip-to-country\/[^=]*=\([a-zA-Z][a-zA-Z]\)$/\1/p' \
+      | tr 'A-Z' 'a-z' | sort -u
     return 0
   fi
 
@@ -1132,11 +1378,14 @@ cmd_exit() {
   elif [[ $target =~ ^[A-Za-z][A-Za-z]$ ]]; then
     target=${target,,}
   else
-    die "expected a two-letter country code, 'auto', or --list"
+    die "expected a two-letter country code, 'auto', --list, or --exclude"
   fi
 
   require_root
   [[ -d $TORRC_DIR ]] || die "$TORRC_DIR is missing -- run setup first"
+  if [[ $target != auto ]] && excluded_exits | grep -qx -- "$target"; then
+    die "${target^^} is excluded, so exits cannot be pinned there. Run 'tormarchy exit --exclude none' first."
+  fi
 
   if [[ $target == auto ]]; then
     rm -f "$TORRC_EXIT"
@@ -1149,16 +1398,7 @@ CONF
     chmod 0644 "$TORRC_EXIT"
   fi
 
-  if tor_is_running; then
-    systemctl reload tor.service 2>/dev/null || systemctl restart tor.service \
-      || die "wrote the config but could not reload tor"
-    publish_cookie || true
-    # A reload changes which exits new circuits may use, but the circuit
-    # already carrying traffic keeps its old exit until it ages out -- up to
-    # ten minutes of the panel saying one country and the traffic leaving from
-    # another. NEWNYM moves new streams onto a circuit built under the new rule.
-    tor_control 'SIGNAL NEWNYM' >/dev/null 2>&1 || true
-  fi
+  reload_for_exit_change
 
   if [[ $target == auto ]]; then
     echo "Exit country cleared. Tor will choose."
@@ -1194,8 +1434,83 @@ install_hint() {
   esac
 }
 
+# A plain bridge -- "198.51.100.7:443 FINGERPRINT" -- names an address first and
+# needs no transport plugin. It used to be read as a transport called
+# "198.51.100.7:443", which nothing provides, so it could never be used.
+BRIDGE_ADDRESS_RE='^(\[[0-9a-fA-F:]+\]|[0-9.]+):[0-9]+$'
+
 transports_in() {
-  awk '!/^[[:space:]]*(#|$)/ { print $1 }' "$1" 2>/dev/null | sort -u
+  awk -v addr="$BRIDGE_ADDRESS_RE" \
+    '!/^[[:space:]]*(#|$)/ && $1 !~ addr { print $1 }' "$1" 2>/dev/null | sort -u
+}
+
+# Bridge lines as people paste them: from the BridgeDB page, a Telegram message,
+# a torrc. Carriage returns go, and so does a leading "Bridge ", torrc's own
+# prefix, which bridge_activate puts back -- so a pasted line and a typed one
+# stage the same.
+normalize_bridge_lines() {
+  head -c "$BRIDGE_INPUT_BYTE_LIMIT" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/^Bridge[[:space:]]+//'
+}
+
+# "<transport> <count>" per line, "plain <count>" for bridges without one.
+# Only lines that are bridge lines count; bridge_invalid_count reports the rest.
+bridge_counts() {
+  awk -v addr="$BRIDGE_ADDRESS_RE" '
+    /^[[:space:]]*(#|$)/ { next }
+    /[\\[:cntrl:]]/ { next }
+    $1 ~ addr { n["plain"]++; next }
+    $1 ~ /^[a-z0-9_]+$/ && $2 ~ addr { n[$1]++ }
+    END { for (t in n) print t, n[t] }
+  ' "$1" 2>/dev/null | sort
+}
+
+# Lines that are neither "<transport> <address:port> ..." nor a plain bridge.
+# A backslash or a control character makes any line invalid: each one becomes a
+# torrc line, and a trailing backslash would carry it onto the next.
+bridge_invalid_count() {
+  awk -v addr="$BRIDGE_ADDRESS_RE" '
+    /^[[:space:]]*(#|$)/ { next }
+    /[\\[:cntrl:]]/ { bad++; next }
+    $1 ~ addr { next }
+    $1 ~ /^[a-z0-9_]+$/ && $2 ~ addr { next }
+    { bad++ }
+    END { print bad + 0 }
+  ' "$1" 2>/dev/null
+}
+
+# {"count":N,"transports":[...]} from "<name> <count>" lines on stdin, with
+# whether this machine can run each transport and how to get it if not.
+bridge_counts_json() {
+  local name count total=0 items="" available hint
+  while read -r name count; do
+    [[ -n $name && $count =~ ^[0-9]+$ ]] || continue
+    total=$(( total + count ))
+    if [[ $name == plain ]] || transport_binary "$name" >/dev/null 2>&1; then
+      available=true hint=""
+    else
+      available=false hint=$(install_hint "$name")
+    fi
+    items+="${items:+,}{\"name\":\"$(json_escape "$name")\",\"count\":$count,\"available\":$available,\"installHint\":\"$(json_escape "$hint")\"}"
+  done
+  printf '"count":%d,"transports":[%s]' "$total" "$items"
+}
+
+bridge_state() {
+  if [[ -f $TORRC_BRIDGES ]]; then printf 'active'
+  elif [[ -f $BRIDGE_SUMMARY || -f $BRIDGE_STASH ]]; then printf 'stashed'
+  else printf 'off'
+  fi
+}
+
+# Root. Refreshes the readable summary from the stash.
+write_bridge_summary() {
+  (( EUID == 0 )) || return 0
+  [[ -f $BRIDGE_STASH ]] || { rm -f "$BRIDGE_SUMMARY"; return 0; }
+  local staging
+  staging=$(mktemp "$BRIDGE_SUMMARY.XXXXXX") || return 1
+  bridge_counts "$BRIDGE_STASH" >"$staging"
+  chmod 0644 "$staging"
+  mv -f -- "$staging" "$BRIDGE_SUMMARY"
 }
 
 # Turn bridge lines into a torrc snippet, refusing any transport this machine
@@ -1247,6 +1562,16 @@ bridge_reload() {
 cmd_bridge() {
   case "${1:-status}" in
   status)
+    if [[ ${2:-} == --json ]]; then
+      local counts=""
+      if [[ -r $BRIDGE_SUMMARY ]]; then
+        counts=$(head -c 4096 -- "$BRIDGE_SUMMARY")
+      elif [[ -r $BRIDGE_STASH ]]; then
+        counts=$(bridge_counts "$BRIDGE_STASH")
+      fi
+      printf '{"state":"%s",%s}\n' "$(bridge_state)" "$(bridge_counts_json <<<"$counts")"
+      return 0
+    fi
     if [[ -f $TORRC_BRIDGES ]]; then
       echo "Bridges: ACTIVE"
       local t
@@ -1259,6 +1584,18 @@ cmd_bridge() {
     else
       echo "Bridges: off (none configured)"
     fi
+    ;;
+  check)
+    # Unprivileged and side-effect free: reads lines on stdin and says what is
+    # in them -- how many, which transports, whether this machine can run them
+    # -- so the panel can show what a paste holds before anything is applied.
+    # It writes nothing anywhere; the lines live in a variable and are gone when
+    # this exits.
+    local input
+    input=$(normalize_bridge_lines)
+    printf '{"invalidLines":%d,%s}\n' \
+      "$(bridge_invalid_count /dev/stdin <<<"$input")" \
+      "$(bridge_counts /dev/stdin <<<"$input" | bridge_counts_json)"
     ;;
   transports)
     local transport binary
@@ -1278,18 +1615,26 @@ cmd_bridge() {
     # stdin through, so escalating first and reading after removes the whole
     # class of problem.
     require_root
-    local tmp
-    tmp=$(mktemp "$TORRC_DIR/.bridges.XXXXXX") || die "could not create a staging file"
-    trap 'rm -f "$tmp"' EXIT
-    chmod 0600 "$tmp"
-    cat >"$tmp"
-    [[ -s $tmp ]] || die "no input on stdin; pipe bridge lines in, e.g. tormarchy bridge set < bridges.txt"
-    grep -qE '^[[:space:]]*[a-z0-9_]+[[:space:]]+[0-9a-fA-F.:\[]' "$tmp" \
-      || die "no bridge lines found; each line starts with a transport name, e.g. obfs4"
+    # Global, not local: the EXIT trap runs after this function has returned,
+    # when a local is already gone. As a local the trap removed nothing, and
+    # every successful set left a copy of the bridge lines behind in torrc.d.
+    BRIDGE_STAGING=$(mktemp "$TORRC_DIR/.bridges.XXXXXX") || die "could not create a staging file"
+    trap 'rm -f -- "$BRIDGE_STAGING"' EXIT
+    chmod 0600 "$BRIDGE_STAGING"
+    normalize_bridge_lines >"$BRIDGE_STAGING"
+    [[ -s $BRIDGE_STAGING ]] || die "no input on stdin; pipe bridge lines in, e.g. tormarchy bridge set < bridges.txt"
+    local counts invalid
+    counts=$(bridge_counts "$BRIDGE_STAGING")
+    [[ -n $counts ]] || die "no bridge lines found; each line starts with a transport name, e.g. obfs4"
+    invalid=$(bridge_invalid_count "$BRIDGE_STAGING")
+    (( invalid == 0 )) || die "$invalid line(s) are not bridge lines; nothing was changed"
 
-    install -d -m 0700 "$(dirname "$BRIDGE_STASH")"
-    install -m 0600 "$tmp" "$BRIDGE_STASH"
-    bridge_activate "$tmp" || die "refusing to write a config tor cannot load"
+    # 0711: the panel can reach the summary by name without being able to list
+    # the directory, and the stash inside stays 0600.
+    install -d -m 0711 "$(dirname "$BRIDGE_STASH")"
+    bridge_activate "$BRIDGE_STAGING" || die "refusing to write a config tor cannot load"
+    install -m 0600 "$BRIDGE_STAGING" "$BRIDGE_STASH"
+    write_bridge_summary || true
     bridge_reload
     echo "Bridges active."
     ;;
@@ -1297,21 +1642,27 @@ cmd_bridge() {
     require_root
     [[ -f $BRIDGE_STASH ]] || die "no stashed bridge lines; use 'tormarchy bridge set' first"
     bridge_activate "$BRIDGE_STASH" || die "refusing to write a config tor cannot load"
+    install -d -m 0711 "$(dirname "$BRIDGE_STASH")"
+    write_bridge_summary || true
     bridge_reload
     echo "Bridges reactivated."
     ;;
   off)
     require_root
     rm -f "$TORRC_BRIDGES"
+    install -d -m 0711 "$(dirname "$BRIDGE_STASH")" 2>/dev/null || true
+    write_bridge_summary || true
     bridge_reload
     echo "Bridges off. Connecting directly."
     ;;
   *)
     cat <<USAGE
-Usage: tormarchy bridge <status|set|on|off|transports>
+Usage: tormarchy bridge <status [--json]|set|check|on|off|transports>
 
-  set   Read bridge lines from stdin and activate them:
-          tormarchy bridge set < bridges.txt
+  set     Read bridge lines from stdin and activate them:
+            tormarchy bridge set < bridges.txt
+  check   Read bridge lines from stdin and report what they need, changing
+          nothing. Needs no root.
 
 Get current bridge lines from https://bridges.torproject.org/options, the
 Telegram bot @GetBridgesBot, or bridges@torproject.org. There is deliberately
@@ -1422,9 +1773,9 @@ cmd_pingd() {
 cmd_ip() {
   tor_is_running || die "tor is not running"
 
-  local info id age exit_ip path_ccs
+  local info id age exit_ip path_ccs _relays
   info=$(circuit_path) || die "no general-purpose circuit built yet: $(cookie_hint)"
-  IFS=$'\t' read -r id age exit_ip path_ccs <<<"$info"
+  IFS=$'\t' read -r id age exit_ip path_ccs _relays <<<"$info"
 
   if [[ ${1:-} == --json ]]; then
     printf '{"circuitId":"%s","exitIp":"%s","path":"%s","ageSec":%s}\n' \
@@ -1543,6 +1894,8 @@ cmd_browser() {
     return 0
   fi
 
+  # A browser run as root is a root process reading the web. Never.
+  (( EUID != 0 )) || die "launch the browser as yourself, not as root"
   command -v systemd-run >/dev/null 2>&1 || die "systemd-run is required for browser-only mode"
   tor_is_running || die "tor is not running; connect first (browser-only mode still needs the SOCKS proxy)"
 
@@ -1615,6 +1968,10 @@ cmd_browser() {
 # the lock cannot be put on, the browser is never started -- a Tor browser that
 # quietly is not one is the failure this exists to prevent.
 cmd_browser_exec() {
+  # The unprivileged half of a launch, and nothing else. Root is only ever asked
+  # for the lock, by browser-lock, and the browser runs as the person launching
+  # it. As root this would start whatever it was handed as root.
+  (( EUID != 0 )) || die "browser-exec never runs as root"
   [[ ${1:-} == -- ]] && shift
   (( $# > 0 )) || die "browser-exec: nothing to launch"
   "$SELF" browser-lock \
@@ -1670,58 +2027,109 @@ RULES
 # ---- diagnostics ----
 
 cmd_doctor() {
-  local failures=0
-  pass() { printf '  \033[32m✓\033[0m %s\n' "$1"; }
-  fail() { printf '  \033[31m✗\033[0m %s\n' "$1"; failures=$(( failures + 1 )); }
-  warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
-  skip() { printf '  \033[90m-\033[0m %s\n' "$1"; }
+  local json=false
+  [[ ${1:-} == --json ]] && json=true
+
+  # Every check is recorded once, then either printed as it is found -- the
+  # terminal view, unchanged -- or kept for --json, which is what the panel's
+  # leak check reads. One list of checks, so the two can never disagree.
+  # Each check also carries a stable id, set with `cid` just before it. The
+  # panel names a check by its id, in a word, and keeps the sentence for when
+  # it is hovered; the terminal prints the sentence as before.
+  local failures=0 group="" check_id=""
+  local -a check_groups=() check_states=() check_texts=() check_details=() check_ids=()
+  cid() { check_id=$1; }
+  record() {
+    local state=$1 text=$2 detail=${3:-}
+    check_groups+=("$group") check_states+=("$state") check_texts+=("$text") check_details+=("$detail")
+    check_ids+=("$check_id")
+    check_id=""
+    [[ $state == fail ]] && failures=$(( failures + 1 ))
+    $json && return 0
+    case $state in
+      pass) printf '  \033[32m✓\033[0m %s\n' "$text" ;;
+      fail) printf '  \033[31m✗\033[0m %s\n' "$text" ;;
+      warn) printf '  \033[33m!\033[0m %s\n' "$text" ;;
+      skip) printf '  \033[90m-\033[0m %s\n' "$text" ;;
+    esac
+    [[ -n $detail ]] && printf '    %s\n' "$detail"
+    return 0
+  }
+  pass() { record pass "$@"; }
+  fail() { record fail "$@"; }
+  warn() { record warn "$@"; }
+  skip() { record skip "$@"; }
+  section() { group=$1; $json || echo "$1"; }
+  gap() { $json || echo; }
 
   local mode connected=false
   mode=$(current_mode)
   rules_present && connected=true
 
-  echo "Tormarchy doctor"
-  echo
-  printf 'State\n  mode: %s\n  rules applied: %s\n  tor running: %s\n\n' \
-    "${mode:-none}" "$connected" "$(tor_is_running && echo true || echo false)"
+  if ! $json; then
+    echo "Tormarchy doctor"
+    echo
+    printf 'State\n  mode: %s\n  rules applied: %s\n  tor running: %s\n\n' \
+      "${mode:-none}" "$connected" "$(tor_is_running && echo true || echo false)"
+  fi
 
-  echo "Tor daemon"
+  section "Tor daemon"
   if ! command -v tor >/dev/null 2>&1; then
-    fail "tor is not installed"
+    cid tor; fail "tor is not installed"
   elif ! tor_is_running; then
     # Stopped while disconnected is the correct idle state, not a fault: setup
     # deliberately leaves tor disabled at boot so a reboot always restores
     # normal networking. Only complain when something is meant to be running.
     if $connected; then
-      fail "rules are applied but tor.service is not running -- the network is blocked"
+      cid tor; fail "rules are applied but tor.service is not running -- the network is blocked"
     else
-      skip "tor is stopped, which is normal while disconnected"
+      cid tor; skip "tor is stopped, which is normal while disconnected"
     fi
   else
-    pass "tor.service is running"
+    cid tor; pass "tor.service is running"
     local pct cookie
     pct=$(bootstrap_progress) || pct=0
+    cid bootstrap
     (( pct >= 100 )) && pass "bootstrapped (100%)" || fail "bootstrap stalled at ${pct}%"
+    cid control
     if cookie=$(cookie_path); then
       pass "control cookie readable at $cookie"
     else
       fail "cannot read the control cookie: $(cookie_hint)"
     fi
   fi
-  echo
+  gap
 
-  echo "Routing"
+  section "Routing"
+  local body seen_ip
   if [[ $mode == socks ]]; then
-    skip "browser-only mode: nothing is routed system-wide by design"
+    # Nothing is routed system-wide here, so the one thing worth proving is the
+    # thing browser-only does offer: that the proxy really leaves through Tor.
+    if ! tor_is_running; then
+      cid proxy; skip "browser-only mode with tor stopped: there is no proxy to check"
+    elif body=$(curl -sf -m 25 --socks5-hostname "127.0.0.1:$SOCKS_PORT" \
+        https://check.torproject.org/api/ip 2>/dev/null); then
+      cid proxy
+      if grep -q '"IsTor":true' <<<"$body"; then
+        seen_ip=$(sed -n 's/.*"IP":"\([^"]*\)".*/\1/p' <<<"$body")
+        pass "the SOCKS proxy on 127.0.0.1:$SOCKS_PORT leaves through Tor" \
+          "${seen_ip:+exit as seen from outside: $seen_ip}"
+      else
+        fail "check.torproject.org says the SOCKS proxy is NOT Tor"
+      fi
+    else
+      cid proxy; fail "could not reach check.torproject.org through the SOCKS proxy"
+    fi
+    cid routing; skip "browser-only mode: nothing else is routed system-wide, by design"
   elif ! $connected; then
-    skip "not connected, so there is nothing to leak"
+    cid routing; skip "not connected, so there is nothing to leak"
   else
-    local body seen_ip
+    cid exit
     if body=$(curl -sf -m 25 https://check.torproject.org/api/ip 2>/dev/null); then
       if grep -q '"IsTor":true' <<<"$body"; then
-        pass "check.torproject.org confirms this connection is Tor"
         seen_ip=$(sed -n 's/.*"IP":"\([^"]*\)".*/\1/p' <<<"$body")
-        [[ -n $seen_ip ]] && printf '    exit as seen from outside: %s\n' "$seen_ip"
+        pass "check.torproject.org confirms this connection is Tor" \
+          "${seen_ip:+exit as seen from outside: $seen_ip}"
       else
         fail "check.torproject.org says this is NOT Tor -- traffic is escaping the redirect"
       fi
@@ -1730,23 +2138,27 @@ cmd_doctor() {
     fi
 
     # Success here is a leak.
+    cid ipv6
     if curl -6 -sf -m 8 https://ipv6.icanhazip.com >/dev/null 2>&1; then
       fail "IPv6 reached the internet directly -- this is a leak"
     else
       pass "IPv6 is blocked"
     fi
 
+    cid ipv6-stack
     if [[ $(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null) == 1 ]]; then
       pass "IPv6 stack is disabled in the kernel as well"
     else
       warn "IPv6 is filtered but the kernel stack is still up"
     fi
 
+    cid dns
     getent hosts example.com >/dev/null 2>&1 \
       && pass "DNS resolves (through Tor's DNSPort)" || fail "DNS is not resolving"
 
     # Forwarded traffic never passes the output hook, so none of the rules above
     # apply to it -- and it is invisible from here.
+    cid forwarding
     if [[ $(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null) == 1 ]]; then
       if (( EUID == 0 )); then
         if nft list chain inet "$NFT_TABLE" filter_forward >/dev/null 2>&1; then
@@ -1764,11 +2176,12 @@ cmd_doctor() {
       pass "IP forwarding is off, so nothing routes through this machine"
     fi
   fi
-  echo
+  gap
 
-  echo "Clock"
+  section "Clock"
   # Tor will not build circuits against a badly skewed clock, and the ruleset
   # drops NTP while connected -- so a long session can drift itself broken.
+  cid clock
   if timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -q yes; then
     pass "clock is NTP-synchronised"
   elif $connected; then
@@ -1776,7 +2189,19 @@ cmd_doctor() {
   else
     warn "clock is not NTP-synchronised; Tor needs an accurate clock"
   fi
-  echo
+  gap
+
+  if $json; then
+    local i items=""
+    for i in "${!check_states[@]}"; do
+      items+="${items:+,}{\"id\":\"$(json_escape "${check_ids[i]}")\",\"group\":\"$(json_escape "${check_groups[i]}")\",\"status\":\"${check_states[i]}\",\"text\":\"$(json_escape "${check_texts[i]}")\",\"detail\":\"$(json_escape "${check_details[i]}")\"}"
+    done
+    printf '{"ok":%s,"failures":%d,"checkedAt":"%s","mode":"%s","checks":[%s]}\n' \
+      "$( (( failures == 0 )) && echo true || echo false)" "$failures" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(json_escape "$mode")" "$items"
+    (( failures == 0 ))
+    return
+  fi
 
   (( failures == 0 )) && echo "No problems found." || { echo "$failures problem(s) found."; return 1; }
 }
@@ -1846,6 +2271,157 @@ Usage: tormarchy boot <status|enable|disable>
 Reconnects at boot if Tor was on when the machine went down. Off by default,
 because a reboot is otherwise the guaranteed way out of a wedged firewall.
 USAGE
+    ;;
+  esac
+}
+
+# ---- the Omarchy menu ----
+#
+# Omarchy has no way for a plugin to add menu rows of its own: the menu reads
+# its shipped defaults and the user's extension file, nothing else. So Tor's
+# rows go in that file, as a block between two marker comments that this command
+# owns -- written by `menu add`, rewritten in place by a later add, taken out by
+# `menu remove`. Everything outside the markers is left exactly as it was.
+#
+# Always the user's own file, written as that user, never as root: setup runs
+# this through runuser. Root writing into a home directory follows whatever
+# symlinks the user has there.
+
+MENU_BEGIN="// >>> tormarchy: written by 'tormarchy menu add'. Edits between these lines are replaced."
+MENU_END="// <<< tormarchy"
+# On: rules applied, or browser-only with tor up. The menu runs every check each
+# time it opens, so this is a file test before it is anything slower.
+MENU_ON='[ -e /run/tormarchy/active ] || { grep -qx socks /run/tormarchy/mode 2>/dev/null && systemctl is-active -q tor; }'
+
+# The menu reads $HOME/.config whatever XDG_CONFIG_HOME says, so this does too.
+menu_file() { printf '%s/.config/omarchy/extensions/omarchy-menu.jsonc' "$HOME"; }
+
+menu_block() {
+  local on=$MENU_ON
+  cat <<BLOCK
+  $MENU_BEGIN
+  "trigger.toggle.tor": {"icon":"󰕥","label":"Tor","checked":"$on","action":"omarchy-shell tripleu.tor toggleTor"},
+  "trigger.tor": {"icon":"󰕥","label":"Tor"},
+  "trigger.tor.connect": {"icon":"󰕥","label":"Connect","when":"! { $on; }","action":"omarchy-shell tripleu.tor connect"},
+  "trigger.tor.disconnect": {"icon":"󰦞","label":"Disconnect","when":"$on","action":"omarchy-shell tripleu.tor disconnect"},
+  "trigger.tor.new-circuit": {"icon":"󰑐","label":"New Circuit","when":"$on","action":"omarchy-shell tripleu.tor newCircuit"},
+  "trigger.tor.panel": {"icon":"󰒓","label":"Panel","action":"omarchy-shell tripleu.tor open"},
+  "trigger.tor.leak-check": {"icon":"󰄬","label":"Leak Check","action":"omarchy-shell tripleu.tor checkLeaks"},
+  "trigger.tor.bridges": {"icon":"󰘘","label":"Bridges","action":"omarchy-shell tripleu.tor bridges"},
+  $MENU_END
+BLOCK
+}
+
+# The file without our block.
+menu_without_block() {
+  awk -v begin="${MENU_BEGIN%%:*}" -v end="$MENU_END" '
+    { line = $0; sub(/^[[:space:]]+/, "", line) }
+    !skipping && index(line, begin) == 1 { skipping = 1; next }
+    skipping { if (index(line, end) == 1) skipping = 0; next }
+    { print }' "$1"
+}
+
+# Our block, right after the opening brace: entries end in commas, which the
+# menu's parser drops before a closing brace, so this is valid whatever follows.
+menu_with_block() {
+  MENU_BLOCK=$(menu_block) awk '
+    !done && !/^[[:space:]]*\/\// {
+      i = index($0, "{")
+      if (i) {
+        print substr($0, 1, i)
+        print ENVIRON["MENU_BLOCK"]
+        rest = substr($0, i + 1)
+        if (rest ~ /[^[:space:]]/) print rest
+        done = 1
+        next
+      }
+    }
+    { print }
+    END { if (!done) exit 3 }'
+}
+
+# Parsed the way the menu parses it: whole-line comments and trailing commas
+# stripped, then JSON. sed -z takes the file whole, so a trailing comma is found
+# across the line break before its brace. Without jq there is no checking it,
+# and the change is structural enough to make anyway.
+menu_parses() {
+  command -v jq >/dev/null 2>&1 || return 0
+  sed -z -E 's#(^|\n)[[:space:]]*//[^\n]*#\1#g; s#,([[:space:]]*[]}])#\1#g' -- "$1" \
+    | jq -e 'type == "object"' >/dev/null 2>&1
+}
+
+menu_write() {   # menu_write add|remove
+  local file target dir tmp
+  file=$(menu_file)
+  # Through a dotfiles symlink to the file it points at, so the link survives.
+  target=$(readlink -f -- "$file" 2>/dev/null) || target=$file
+  dir=$(dirname -- "$target")
+
+  if [[ $1 == remove && ! -f $target ]]; then
+    echo "No Tormarchy entries in the Omarchy menu."
+    return 0
+  fi
+  if [[ -f $target ]] && ! menu_parses "$target"; then
+    die "$file does not parse as it is; fix it first, nothing was changed"
+  fi
+  mkdir -p -- "$dir" || die "could not create $dir"
+  tmp=$(mktemp -- "$target.XXXXXX") || die "could not write next to $target"
+
+  if [[ ! -s $target ]]; then
+    if [[ $1 == add ]]; then
+      { echo "{"; menu_block; echo "}"; } >"$tmp"
+    else
+      : >"$tmp"
+    fi
+  elif [[ $1 == add ]]; then
+    menu_without_block "$target" | menu_with_block >"$tmp" \
+      || { rm -f -- "$tmp"; die "$file has no opening brace; fix it first, nothing was changed"; }
+  else
+    menu_without_block "$target" >"$tmp"
+  fi
+
+  if ! menu_parses "$tmp"; then
+    rm -f -- "$tmp"
+    die "the menu would not parse after the change, so nothing was changed"
+  fi
+  [[ -f $target ]] && chmod --reference="$target" -- "$tmp" 2>/dev/null
+  mv -f -- "$tmp" "$target" || { rm -f -- "$tmp"; die "could not replace $file"; }
+}
+
+# Run as the person who ran sudo, in their own home.
+menu_as_user() {   # menu_as_user <user> <add|remove>
+  local user=$1 verb=$2 home
+  [[ -n $user && $user != root ]] || return 1
+  home=$(getent passwd "$user" | cut -d: -f6)
+  [[ -n $home && -d $home ]] || return 1
+  runuser -u "$user" -- env HOME="$home" "$SELF" menu "$verb"
+}
+
+cmd_menu() {
+  if (( EUID == 0 )); then
+    # sudo tormarchy menu add means the person behind sudo, never root's home.
+    menu_as_user "${SUDO_USER:-}" "${1:-status}" && return
+    die "run this as yourself, not as root"
+  fi
+  case "${1:-status}" in
+  add)
+    menu_write add
+    echo "Tor is in the Omarchy menu: Trigger > Tor, and Trigger > Toggle > Tor."
+    ;;
+  remove)
+    menu_write remove
+    echo "Removed Tormarchy's entries from the Omarchy menu."
+    ;;
+  status)
+    if [[ -f $(menu_file) ]] && grep -qF -- "${MENU_BEGIN%%:*}" "$(menu_file)"; then
+      echo "Tor is in the Omarchy menu."
+    else
+      echo "Tor is not in the Omarchy menu. Add it with: tormarchy menu add"
+    fi
+    ;;
+  *)
+    echo "Usage: tormarchy menu <add|remove|status>" >&2
+    return 1
     ;;
   esac
 }
@@ -1953,8 +2529,8 @@ cmd_setup() {
   # polkitd what it knows rather than trusting the file copy.
   if command -v pkaction >/dev/null 2>&1; then
     registered=$(pkaction 2>/dev/null | grep -c '^com\.tormarchy\.')
-    (( registered >= 1 )) && echo "  $registered action registered" \
-      || echo "  WARNING: the action did not register; connecting will prompt for a password" >&2
+    (( registered == ${#PKEXEC_COMMANDS[@]} )) && echo "  $registered actions registered" \
+      || echo "  WARNING: $registered of ${#PKEXEC_COMMANDS[@]} actions registered; some commands will prompt for a password" >&2
   fi
 
   step "Verifying the tor config"
@@ -1980,6 +2556,22 @@ cmd_setup() {
       usermod -aG tor "$target_user" || die "could not add $target_user to the tor group"
       echo "  added $target_user to the 'tor' group"
     fi
+  fi
+
+  # An older install made /etc/tormarchy 0700 and wrote no summary, so the panel
+  # could not see saved bridges at all: it read them as off and offered no way
+  # to turn them back on. 0711 lets it reach the summary by name, and the
+  # summary is written now rather than at the next bridge change.
+  if [[ -d $(dirname "$BRIDGE_STASH") ]]; then
+    step "Updating saved bridges for the panel"
+    chmod 0711 "$(dirname "$BRIDGE_STASH")"
+    write_bridge_summary && echo "  $BRIDGE_SUMMARY"
+  fi
+
+  if [[ -n $target_user ]]; then
+    step "Adding Tor to the Omarchy menu"
+    menu_as_user "$target_user" add | sed 's/^/  /' \
+      || echo "  could not; add it later with: tormarchy menu add"
   fi
 
   # Deliberately not enabled at boot. Tor starting itself every boot would be a
@@ -2049,12 +2641,19 @@ cmd_uninstall() {
   systemctl reset-failed tor.service 2>/dev/null || true
   echo "  stopped and disabled"
 
+  # Before the files go: these rows would otherwise call a command that is no
+  # longer there.
+  if [[ -n ${SUDO_USER:-} ]]; then
+    step "Removing Tor from the Omarchy menu"
+    menu_as_user "$SUDO_USER" remove | sed 's/^/  /' || echo "  nothing to remove"
+  fi
+
   step "Removing files"
   rm -f "$BIN_DIR/tormarchy"
   # Anything left by the old fifteen-executable layout.
   rm -f "$BIN_DIR"/tormarchy-* 2>/dev/null || true
   rm -rf /usr/local/lib/tormarchy
-  rm -f "$TORRC_BASE" "$TORRC_EXIT" "$TORRC_BRIDGES"
+  rm -f "$TORRC_BASE" "$TORRC_EXIT" "$TORRC_EXCLUDE" "$TORRC_BRIDGES"
   rm -f "$POLKIT_ACTIONS/com.tormarchy.policy" "$POLKIT_RULES/49-tormarchy.rules"
   rm -f "$BASH_COMPLETION/tormarchy" "$ZSH_COMPLETION/_tormarchy"
   echo "  helpers, torrc snippets, polkit files and completion"
@@ -2114,14 +2713,17 @@ tormarchy -- route traffic through Tor, from the Omarchy bar.
                                            control port. Makes no request.
   newnym                                   New circuit.
   exit <cc>|auto|--list                    Pin or clear the exit country.
-  bridge <status|set|on|off|transports>    Use bridges where Tor is blocked.
+  exit --exclude <cc,cc>|none              Never exit in these countries.
+  bridge <status|set|check|on|off|transports>
+                                           Use bridges where Tor is blocked.
   browser [name]|--list                    Launch a browser, in an instance of
                                            its own, that the firewall lets
                                            reach nothing but Tor.
   speed [--json]                           One latency measurement.
   pingd [seconds]                          Stream live latency, one per line.
-  doctor                                   Leak checks.
+  doctor [--json]                          Leak checks.
   boot <status|enable|disable>             Reconnect at boot if Tor was on.
+  menu <add|remove|status>                 Tor in the Omarchy menu. setup adds it.
   panic                                    Remove every rule. The escape hatch.
   setup / uninstall [--purge]              Install or remove the system side.
                                            Terminal + sudo only.
@@ -2136,6 +2738,14 @@ USAGE
 command="${1:-help}"
 shift || true
 
+# Through pkexec, only what is on the list, whatever polkit decided: the grant is
+# passwordless, so anything running as the user who installed this can reach it.
+# browser-exec, which becomes whatever program it is handed, once ran as root
+# this way -- a root shell for any process in that session, without a password.
+if [[ -n ${PKEXEC_UID:-} && " ${PKEXEC_COMMANDS[*]} " != *" $command "* ]]; then
+  die "that subcommand does not run as root through polkit"
+fi
+
 case "$command" in
 connect)    cmd_connect "$@" ;;
 disconnect) cmd_disconnect "$@" ;;
@@ -2144,6 +2754,7 @@ status)     cmd_status "$@" ;;
 ip)         cmd_ip "$@" ;;
 newnym)     cmd_newnym "$@" ;;
 exit)       cmd_exit "$@" ;;
+menu)       cmd_menu "$@" ;;
 bridge)     cmd_bridge "$@" ;;
 browser)    cmd_browser "$@" ;;
 browser-exec) cmd_browser_exec "$@" ;;

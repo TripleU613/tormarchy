@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "tripleu.tor",
   "name": "Tormarchy",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "author": "TripleU613",
   "license": "MIT",
-  "description": "Route all system traffic through Tor from the Omarchy bar, with a real kill switch, new circuits, and exit-country selection.",
+  "description": "Route all system traffic through Tor from the Omarchy bar, with a real kill switch, a leak check, bridges, new circuits, and exit-country selection.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Tor",
-    "description": "Toggle system-wide Tor, request a new circuit, pick an exit country, and test circuit speed.",
+    "description": "Toggle system-wide Tor, check for leaks, paste bridges, request a new circuit, pick an exit country, and test circuit speed.",
     "category": "Network",
     "aliases": [
       "tor",
@@ -27,14 +27,17 @@
       "bridge",
       "exit node",
       "kill switch",
-      "firewall"
+      "firewall",
+      "leak test",
+      "censorship"
     ],
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
       "mode": "lan",
       "refreshIntervalSec": 5,
-      "speedIntervalSec": 3
+      "speedIntervalSec": 3,
+      "notifications": "problems"
     },
     "schema": [
       {
@@ -67,6 +70,18 @@
         "max": 60,
         "step": 1,
         "defaultValue": 3
+      },
+      {
+        "key": "notifications",
+        "type": "enum",
+        "label": "Notifications",
+        "options": [
+          "problems",
+          "all",
+          "off"
+        ],
+        "defaultValue": "problems",
+        "description": "problems: the kill switch engaging, Tor coming back, and a connect that fails. all: also every successful connect and bridges taking over. off: no notifications."
       }
     ]
   }

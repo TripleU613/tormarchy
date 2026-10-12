@@ -60,13 +60,69 @@ function parseStatus(raw) {
     // Bash emits the code; the display name is a JS-side concern.
     exitCountryName: countryName(data.exitCountry),
     requestedExit: String(data.requestedExit || ""),
+    excludedExits: countryCodes(data.excludedExits),
     circuitAgeSec: Number(data.circuitAgeSec || 0),
     path: Array.isArray(data.path) ? data.path : [],
+    // Absent from older helpers; the path alone still renders.
+    hops: parseHops(data.hops),
     bytesRead: Number(data.bytesRead || 0),
     bytesWritten: Number(data.bytesWritten || 0),
     statusText: String(data.statusText || ""),
+    // Absent from helpers older than the bridge tool; left undefined then, so
+    // the panel keeps what it had rather than reading every bridge as off.
+    bridges: ["active", "stashed", "off"].indexOf(String(data.bridges)) !== -1 ? String(data.bridges) : undefined,
     warnings: Array.isArray(data.warnings) ? data.warnings : []
   }
+}
+
+function countryCodes(list) {
+  var out = []
+  if (!Array.isArray(list)) return out
+  for (var i = 0; i < list.length; i++) {
+    var cc = String(list[i] || "").toLowerCase()
+    if (/^[a-z]{2}$/.test(cc) && out.indexOf(cc) === -1) out.push(cc)
+  }
+  return out
+}
+
+function parseHops(list) {
+  var out = []
+  if (!Array.isArray(list)) return out
+  for (var i = 0; i < list.length; i++) {
+    var h = list[i] || {}
+    out.push({
+      cc: String(h.cc || "").toLowerCase(),
+      nickname: String(h.nickname || ""),
+      flags: Array.isArray(h.flags) ? h.flags.map(String) : [],
+      bandwidthKBps: Math.max(0, Number(h.bandwidthKBps) || 0)
+    })
+  }
+  return out
+}
+
+// Consensus bandwidth, which tor gives in kilobytes per second.
+function formatRelayBandwidth(kbps) {
+  var n = Number(kbps)
+  if (!isFinite(n) || n <= 0) return ""
+  if (n < 1000) return qsTr("%1 KB/s").arg(Math.round(n))
+  var mb = n / 1000
+  return qsTr("%1 MB/s").arg(mb < 10 ? mb.toFixed(1) : Math.round(mb))
+}
+
+// "Guard · Sweden · relayname · 12 MB/s · Fast, Stable". The role is the hop's
+// position; a Guard or Exit flag repeating it is left out.
+function hopTooltip(hop, index, total, cc) {
+  var parts = [hopRole(index, total)]
+  var code = String((hop && hop.cc) || cc || "").toLowerCase()
+  if (code !== "" && code !== "xx") parts.push(countryName(code))
+  if (!hop) return parts.join(" · ")
+  if (hop.nickname !== "") parts.push(hop.nickname)
+  var bw = formatRelayBandwidth(hop.bandwidthKBps)
+  if (bw !== "") parts.push(bw)
+  var role = String(parts[0])
+  var flags = hop.flags.filter(function(f) { return String(f) !== role })
+  if (flags.length > 0) parts.push(flags.join(", "))
+  return parts.join(" · ")
 }
 
 function clampPercent(value) {
@@ -152,23 +208,52 @@ function countryName(code) {
 
 // Label for the currently pinned exit. "Automatic" is the honest word for an
 // unpinned exit: Tor is choosing, we are not.
-function exitLabel(requested) {
+// What the exit picker shows. On Automatic with countries excluded, that is the
+// request: "Not US, RU" under the EXIT caption. A pinned exit makes exclusions
+// moot -- tor uses only that country -- so it shows just the country.
+function exitLabel(requested, excluded) {
   var cc = String(requested || "").toLowerCase()
-  return cc === "" ? qsTr("Automatic") : countryName(cc)
+  if (cc !== "") return countryName(cc)
+  var never = countryCodes(excluded)
+  if (never.length > 0) return qsTr("Not %1").arg(never.join(", ").toUpperCase())
+  return qsTr("Automatic")
 }
 
-// Dropdown options: Automatic first, then every country Tor reported an exit
-// relay in, sorted by the name we actually display rather than by code.
-function exitOptions(codes) {
-  var options = [{ value: "auto", label: qsTr("Automatic"), description: qsTr("Let Tor choose the exit") }]
+// Automatic, then the countries picked recently -- the ones someone is most
+// likely after -- then everything else alphabetically. A recent country with no
+// exits right now is left out rather than offered as a choice that would fail.
+//
+// An excluded country is left out too: pinning exits there is refused, since it
+// would leave no exit at all.
+function exitOptions(codes, recent, excluded) {
+  var excludedList = countryCodes(excluded)
+  // The trigger shows the selected option's own label, so this is where
+  // "Not US, RU" has to live for it to be seen.
+  var options = [{ value: "auto", label: exitLabel("", excludedList),
+                   description: excludedList.length > 0
+                     ? qsTr("Tor chooses from everywhere else")
+                     : qsTr("Let Tor choose the exit") }]
+  var available = {}
+  var never = {}
+  for (var k = 0; k < excludedList.length; k++) never[excludedList[k]] = true
   var list = []
   for (var i = 0; i < (codes || []).length; i++) {
     var cc = String(codes[i] || "").toLowerCase()
-    if (cc.length !== 2) continue
+    if (cc.length !== 2 || available[cc] || never[cc]) continue
+    available[cc] = true
     list.push({ value: cc, label: countryName(cc) })
   }
+  var pinned = {}
+  var first = []
+  for (var j = 0; j < (recent || []).length; j++) {
+    var r = String(recent[j] || "").toLowerCase()
+    if (!available[r] || pinned[r]) continue
+    pinned[r] = true
+    first.push({ value: r, label: countryName(r), description: qsTr("Recent") })
+  }
+  list = list.filter(function(o) { return !pinned[o.value] })
   list.sort(function(a, b) { return a.label.localeCompare(b.label) })
-  return options.concat(list)
+  return options.concat(first, list)
 }
 
 // Pinning exits shrinks the relay pool you can leave through, which is worse
@@ -264,4 +349,348 @@ function pushHistory(history, value, limit) {
   var max = Number(limit) || 16
   while (out.length > max) out.shift()
   return out
+}
+
+// The leak check: `tormarchy doctor --json`. A failing check still produces a
+// full report (doctor exits non-zero then), so the report is judged on its own
+// contents, never on the exit code.
+var DOCTOR_STATES = ["pass", "warn", "fail", "skip"]
+
+function parseDoctor(raw) {
+  var text = String(raw || "").trim()
+  if (text === "") return { ok: false, error: qsTr("The leak check returned nothing") }
+  var data = null
+  try {
+    data = JSON.parse(text)
+  } catch (e) {
+    return { ok: false, error: qsTr("Could not read the leak check") }
+  }
+  if (!data || typeof data !== "object" || !Array.isArray(data.checks)) {
+    return { ok: false, error: qsTr("Unexpected leak check output") }
+  }
+  var checks = []
+  for (var i = 0; i < data.checks.length; i++) {
+    var c = data.checks[i] || {}
+    checks.push({
+      id: String(c.id || ""),
+      group: String(c.group || ""),
+      // An unknown state is shown as skipped rather than trusted: a check this
+      // panel does not understand must not render as a pass.
+      status: DOCTOR_STATES.indexOf(String(c.status)) !== -1 ? String(c.status) : "skip",
+      text: String(c.text || ""),
+      detail: String(c.detail || "")
+    })
+  }
+  return {
+    ok: true,
+    healthy: data.ok === true,
+    failures: Math.max(0, Number(data.failures) || 0),
+    checkedAt: String(data.checkedAt || ""),
+    checks: checks
+  }
+}
+
+// "5 passed · 1 warning". Skips are left out: they are what the current mode
+// does not need checking, not a result.
+function doctorSummary(result) {
+  if (!result || !result.ok) return ""
+  var passed = 0, warned = 0, failed = 0
+  for (var i = 0; i < result.checks.length; i++) {
+    var s = result.checks[i].status
+    if (s === "pass") passed++
+    else if (s === "warn") warned++
+    else if (s === "fail") failed++
+  }
+  var parts = []
+  if (failed > 0) parts.push(failed === 1 ? qsTr("1 problem") : qsTr("%1 problems").arg(failed))
+  if (warned > 0) parts.push(warned === 1 ? qsTr("1 warning") : qsTr("%1 warnings").arg(warned))
+  if (passed > 0) parts.push(qsTr("%1 passed").arg(passed))
+  return parts.length ? parts.join(" · ") : qsTr("Nothing to check")
+}
+
+// The worst result in a report, for the tile's one glyph.
+function doctorOverall(result) {
+  if (!result || !result.ok) return ""
+  var worst = "pass"
+  for (var i = 0; i < result.checks.length; i++) {
+    var s = result.checks[i].status
+    if (s === "fail") return "fail"
+    if (s === "warn") worst = "warn"
+  }
+  return worst
+}
+
+function doctorGlyph(status) {
+  switch (String(status || "")) {
+  case "pass": return "󰄬"
+  case "warn": return "󰀦"
+  case "fail": return "󰅙"
+  default: return "–"
+  }
+}
+
+// How long ago something happened, for "checked 2 min ago".
+function formatAgo(seconds) {
+  var n = Math.max(0, Math.floor(Number(seconds) || 0))
+  if (n < 60) return qsTr("just now")
+  if (n < 3600) return qsTr("%1 min ago").arg(Math.floor(n / 60))
+  return qsTr("%1 h ago").arg(Math.floor(n / 3600))
+}
+
+// Bridges, as the tile states them. `state` comes from the status poll on every
+// refresh; `detail` from `tormarchy bridge status --json`, read when the bridge
+// tool opens, and is only ever transport names and counts.
+function bridgeStateLabel(state, detail) {
+  var count = detail && Number(detail.count) > 0 ? Number(detail.count) : 0
+  var transports = detail && Array.isArray(detail.transports) ? detail.transports : []
+  // It has a third of the panel's width: the transport only when there is just
+  // one, the full breakdown is in the expanded section.
+  var what = count === 0 ? ""
+    : (transports.length === 1 ? qsTr("%1 %2").arg(count).arg(String(transports[0].name || ""))
+    : (count === 1 ? qsTr("1 bridge") : qsTr("%1 bridges").arg(count)))
+  switch (String(state || "")) {
+  case "active": return what ? qsTr("On · %1").arg(what) : qsTr("On")
+  case "stashed": return count > 0 ? qsTr("Off · %1 saved").arg(count) : qsTr("Off · saved")
+  default: return qsTr("Off")
+  }
+}
+
+// ---- notifications -------------------------------------------------------
+//
+// What deserves a toast, decided here rather than in the Service so every
+// transition can be tested without a shell. The states are the bar icon's:
+// off, connecting, routed, browser, blocked. "problems" (the default) speaks
+// only when something has gone wrong or come back; "all" also confirms the
+// slow successes; "off" never speaks.
+
+var NOTIFICATION_POLICIES = ["problems", "all", "off"]
+
+function notificationPolicy(value) {
+  var v = String(value || "")
+  return NOTIFICATION_POLICIES.indexOf(v) !== -1 ? v : "problems"
+}
+
+// The connection as one word, from a status that has been applied in full.
+function connectionState(s) {
+  if (!s || !s.installed) return "off"
+  if (s.connected && !s.torRunning) return "blocked"
+  if (s.connected) return "routed"
+  if (s.mode === "socks" && s.torRunning && !s.bootstrapping) return "browser"
+  if (s.torRunning) return "connecting"
+  return "off"
+}
+
+function notificationFor(prev, next, policy, context) {
+  var p = notificationPolicy(policy)
+  if (p === "off" || !prev || prev === next) return null
+  var ctx = context || {}
+
+  // The one that matters most: the network has gone quiet on purpose, and the
+  // user may be nowhere near the bar to see the icon turn red. Critical, so it
+  // stays until it is dealt with.
+  if (next === "blocked") {
+    return {
+      headline: qsTr("Kill switch engaged"),
+      body: qsTr("Network blocked until Tor is back"),
+      urgency: "critical",
+      glyph: "󰻌"
+    }
+  }
+  // Leaving it replaces that toast, so a critical one never outlives the
+  // problem it describes.
+  if (prev === "blocked" && next === "routed") {
+    return {
+      headline: qsTr("Tor is back"),
+      body: qsTr("Traffic is routed again"),
+      urgency: "normal",
+      glyph: "󰕥"
+    }
+  }
+  if (prev === "blocked") {
+    return {
+      headline: qsTr("Network restored"),
+      body: qsTr("Tormarchy is off"),
+      urgency: "low",
+      glyph: "󰦞"
+    }
+  }
+
+  if (p !== "all") return null
+  if (next === "routed") {
+    var where = String(ctx.exitCountryName || "")
+    return {
+      headline: qsTr("Connected through Tor"),
+      body: where !== "" ? qsTr("Leaving from %1").arg(where) : qsTr("All traffic via Tor"),
+      urgency: "low",
+      glyph: "󰕥"
+    }
+  }
+  if (next === "browser") {
+    return {
+      headline: qsTr("Tor is ready"),
+      body: qsTr("Browser-only proxy is up"),
+      urgency: "low",
+      glyph: "󰇧"
+    }
+  }
+  return null
+}
+
+// A connect that failed on its own. Not one the user cancelled: they know.
+function connectFailedNotification(error, policy) {
+  if (notificationPolicy(policy) === "off") return null
+  return {
+    headline: qsTr("Couldn't connect to Tor"),
+    body: brief(error, 40) || qsTr("Network unchanged"),
+    urgency: "normal",
+    glyph: "󰀨"
+  }
+}
+
+// Bridges switched on by connect's own fallback, rather than by the user.
+function bridgesNotification(prevState, nextState, policy, userAction) {
+  if (notificationPolicy(policy) !== "all" || userAction) return null
+  if (nextState !== "active" || prevState === "active") return null
+  return {
+    headline: qsTr("Using bridges"),
+    body: qsTr("This network blocks Tor"),
+    urgency: "low",
+    glyph: "󰘘"
+  }
+}
+
+// The sender's argv. Built here so its shape is tested: discrete arguments,
+// never a shell string, through Omarchy's own sender and never notify-send.
+// The headline and body are the only free text and go in as positionals, which
+// the sender treats as text whatever they contain.
+function notificationArgv(n, replaceId) {
+  var argv = ["omarchy-notification-send", "--app-name", "Tormarchy",
+              "-g", String(n.glyph || ""), "-u", String(n.urgency || "low"), "-p"]
+  if (/^[0-9]+$/.test(String(replaceId || ""))) argv.push("-r", String(replaceId))
+  argv.push(String(n.headline), String(n.body || ""), "--exec", "omarchy-shell", "tripleu.tor", "open")
+  return argv
+}
+
+// `tormarchy bridge check` and `bridge status --json`: counts and transport
+// names only. The lines themselves never come back.
+function parseBridgeReport(raw) {
+  var data = null
+  try {
+    data = JSON.parse(String(raw || "").trim())
+  } catch (e) {
+    return { ok: false }
+  }
+  if (!data || typeof data !== "object") return { ok: false }
+  var transports = []
+  var list = Array.isArray(data.transports) ? data.transports : []
+  for (var i = 0; i < list.length; i++) {
+    var t = list[i] || {}
+    transports.push({
+      name: String(t.name || ""),
+      count: Math.max(0, Number(t.count) || 0),
+      available: t.available === true,
+      installHint: String(t.installHint || "")
+    })
+  }
+  return {
+    ok: true,
+    state: ["active", "stashed", "off"].indexOf(String(data.state)) !== -1 ? String(data.state) : "",
+    count: Math.max(0, Number(data.count) || 0),
+    invalidLines: Math.max(0, Number(data.invalidLines) || 0),
+    transports: transports
+  }
+}
+
+// "4 bridges", the breakdown by transport listed beneath it.
+function bridgeCountText(report) {
+  if (!report || !report.ok || report.count === 0) return qsTr("No bridge lines")
+  return report.count === 1 ? qsTr("1 bridge") : qsTr("%1 bridges").arg(report.count)
+}
+
+function missingTransports(report) {
+  var out = []
+  if (!report || !report.ok) return out
+  for (var i = 0; i < report.transports.length; i++) {
+    if (!report.transports[i].available) out.push(report.transports[i])
+  }
+  return out
+}
+
+// ---- copy ------------------------------------------------------------------
+//
+// The panel shows labels, never sentences. Anything that explains goes in a
+// hover bubble instead, and these make the two halves: a short form for the
+// panel, and the whole text wrapped for the bubble, since the shell's tooltip
+// draws a single line however long it is.
+
+var BRIEF_LIMIT = 32
+
+// The first clause of a message, capped: "tor stalled at 40% bootstrap. No
+// rules applied, ..." reads "Tor stalled at 40% bootstrap".
+function brief(text, limit) {
+  var max = Number(limit) > 0 ? Number(limit) : BRIEF_LIMIT
+  var s = String(text || "").replace(/\s+/g, " ").trim().replace(/^tormarchy:\s*/i, "")
+  var cut = s.search(/(\.\s|\s--\s|;\s|:\s)/)
+  if (cut > 0) s = s.slice(0, cut)
+  s = s.replace(/[.:;]+$/, "")
+  if (s.length > max) {
+    var head = s.slice(0, max - 1)
+    var space = head.lastIndexOf(" ")
+    s = (space > max / 2 ? head.slice(0, space) : head) + "\u2026"
+  }
+  return s.length > 0 ? s.charAt(0).toUpperCase() + s.slice(1) : ""
+}
+
+// Word-wrapped to lines a bubble can hold.
+function wrapTip(text, width) {
+  var max = Number(width) > 0 ? Number(width) : 46
+  var out = []
+  var paragraphs = String(text || "").split("\n")
+  for (var p = 0; p < paragraphs.length; p++) {
+    var words = paragraphs[p].split(/\s+/).filter(function(w) { return w !== "" })
+    var line = ""
+    for (var i = 0; i < words.length; i++) {
+      if (line !== "" && line.length + 1 + words[i].length > max) {
+        out.push(line)
+        line = words[i]
+      } else {
+        line = line === "" ? words[i] : line + " " + words[i]
+      }
+    }
+    if (line !== "") out.push(line)
+  }
+  return out.join("\n")
+}
+
+// A status warning as a label. The two the helper sends get their own words;
+// anything else is cut to its first clause.
+function briefWarning(text) {
+  var s = String(text || "")
+  if (/kill switch/i.test(s)) return qsTr("Kill switch holding")
+  var m = /bootstrapping at (\d+)%/i.exec(s)
+  if (m) return qsTr("Reconnecting \u00b7 %1%").arg(m[1])
+  return brief(s)
+}
+
+// What each leak check is called on the panel. The full sentence is its bubble.
+function checkLabel(check) {
+  switch (String((check && check.id) || "")) {
+  case "tor": return qsTr("Tor")
+  case "bootstrap": return qsTr("Bootstrap")
+  case "control": return qsTr("Control port")
+  case "proxy": return qsTr("Proxy")
+  case "routing": return qsTr("Routing")
+  case "exit": return qsTr("Exit")
+  case "ipv6": return qsTr("IPv6")
+  case "ipv6-stack": return qsTr("IPv6 stack")
+  case "dns": return qsTr("DNS")
+  case "forwarding": return qsTr("Forwarding")
+  case "clock": return qsTr("Clock")
+  default: return brief(check ? check.text : "", 16)
+  }
+}
+
+function checkTip(check) {
+  if (!check) return ""
+  return wrapTip(String(check.text || "") + (check.detail ? "\n" + check.detail : ""))
 }
