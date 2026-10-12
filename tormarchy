@@ -338,13 +338,17 @@ tor_control() {
     cookie=$(od -An -tx1 -v "$candidate" 2>/dev/null | tr -d ' \n')
     [[ -n $cookie ]] || continue
 
-    exec 3<>"/dev/tcp/127.0.0.1/$CONTROL_PORT" 2>/dev/null || return 1
+    # The 2>/dev/null on the group, not on the exec. A bare exec applies every
+    # redirection to the whole process, so `exec 3<>... 2>/dev/null` silenced
+    # stderr for good after the first control-port call: a connect that then
+    # failed died without a word, and the panel could only say it had failed.
+    { exec 3<>"/dev/tcp/127.0.0.1/$CONTROL_PORT"; } 2>/dev/null || return 1
 
     printf 'AUTHENTICATE %s\r\n' "$cookie" >&3
     if ! IFS= read -r -t 3 reply <&3 || [[ $reply != 250* ]]; then
       # tor closes the session after a failed AUTHENTICATE, so the next
       # cookie gets a connection of its own.
-      exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
+      { exec 3<&- 3>&-; } 2>/dev/null
       continue
     fi
 
@@ -359,7 +363,7 @@ tor_control() {
     # as no answer.
     timeout "${TOR_CONTROL_TIMEOUT:-5}" head -c "$CONTROL_REPLY_BYTE_LIMIT" <&3
     status=$?
-    exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null
+    { exec 3<&- 3>&-; } 2>/dev/null
     return $status
   done
   return 1
@@ -967,10 +971,10 @@ wait_circuit() {
 dns_probe() {
   local query='\x7e\x51\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x05check\x0atorproject\x03org\x00\x00\x01\x00\x01'
   local reply
-  exec 4<>"/dev/udp/127.0.0.1/$DNS_PORT" 2>/dev/null || return 1
+  { exec 4<>"/dev/udp/127.0.0.1/$DNS_PORT"; } 2>/dev/null || return 1
   printf '%b' "$query" >&4
   reply=$(timeout "$ROUTE_PROBE_TIMEOUT" head -c 4 <&4 2>/dev/null | od -An -tx1 | tr -d ' \n')
-  exec 4<&- 2>/dev/null
+  { exec 4<&-; } 2>/dev/null
   # id 7e51, a response (top bit of byte 3), rcode 0 (low nibble of byte 4).
   [[ $reply =~ ^7e51([0-9a-f]{2})([0-9a-f]{2})$ ]] || return 1
   (( 16#${BASH_REMATCH[1]} & 0x80 )) && (( (16#${BASH_REMATCH[2]} & 0x0f) == 0 ))
@@ -2552,6 +2556,16 @@ cmd_setup() {
       usermod -aG tor "$target_user" || die "could not add $target_user to the tor group"
       echo "  added $target_user to the 'tor' group"
     fi
+  fi
+
+  # An older install made /etc/tormarchy 0700 and wrote no summary, so the panel
+  # could not see saved bridges at all: it read them as off and offered no way
+  # to turn them back on. 0711 lets it reach the summary by name, and the
+  # summary is written now rather than at the next bridge change.
+  if [[ -d $(dirname "$BRIDGE_STASH") ]]; then
+    step "Updating saved bridges for the panel"
+    chmod 0711 "$(dirname "$BRIDGE_STASH")"
+    write_bridge_summary && echo "  $BRIDGE_SUMMARY"
   fi
 
   if [[ -n $target_user ]]; then

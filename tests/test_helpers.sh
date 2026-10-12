@@ -157,10 +157,11 @@ echo "Finding a route"
 # each query under the query's own id, with the rcode it is told to.
 dns_port=$(python3 -c 'import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
 printf '0' >"$scratch/rcode"
-python3 - "$dns_port" "$scratch/rcode" <<'PY' &
+python3 - "$dns_port" "$scratch/rcode" "$scratch/resolver-ready" <<'PY' &
 import socket, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(("127.0.0.1", int(sys.argv[1])))
+open(sys.argv[3], "w").close()       # bound: the test may start asking
 while True:
     q, addr = s.recvfrom(512)
     rcode = int(open(sys.argv[2]).read() or 0)
@@ -169,10 +170,15 @@ while True:
     s.sendto(q[:2] + bytes([0x81, 0x80 | rcode]) + q[4:], addr)
 PY
 resolver=$!
-sleep 0.5
+# Until the resolver says it is bound, not for a guess at how long that takes:
+# a loaded runner can be slower than any fixed sleep.
+for _ in $(seq 100); do [[ -e $scratch/resolver-ready ]] && break; sleep 0.05; done
 DNS_PORT=$dns_port
 ROUTE_PROBE_TIMEOUT=2
 dns_probe && ok "a lookup through tor's resolver is understood" || bad "a NOERROR answer was not accepted"
+out=$( { dns_probe; echo "still heard" >&2; } 2>&1 )
+[[ $out == *"still heard"* ]] && ok "and stderr still works after it, so a later error is not lost" \
+  || bad "dns_probe left stderr redirected for the rest of the process"
 printf '2' >"$scratch/rcode"
 dns_probe && bad "a SERVFAIL was taken for an answer" || ok "a resolver that fails is not a route"
 printf -- '-1' >"$scratch/rcode"
@@ -220,6 +226,32 @@ printf '0' >"$scratch/rcode"
 kill "$resolver" 2>/dev/null
 unset -f sleep route_probe_ms route tor_control tor_is_running
 DNS_PORT=9053
+
+# The same for the control port, which every status read and bootstrap wait
+# goes through: a connect that stalls must still be able to say so.
+ctl_port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+python3 - "$ctl_port" "$scratch/control-ready" <<'PY' &
+import socket, sys
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", int(sys.argv[1]))); srv.listen()
+open(sys.argv[2], "w").close()
+conn, _ = srv.accept()
+for line in conn.makefile("rb"):
+    conn.sendall(b"250 OK\r\n")
+    if line.startswith(b"QUIT"):
+        break
+PY
+control=$!
+for _ in $(seq 100); do [[ -e $scratch/control-ready ]] && break; sleep 0.05; done
+printf 'cookie' >"$scratch/control.cookie"
+saved_candidates=("${COOKIE_CANDIDATES[@]}"); saved_port=$CONTROL_PORT
+COOKIE_CANDIDATES=("$scratch/control.cookie"); CONTROL_PORT=$ctl_port
+out=$( { unset -f tor_control; source <(sed -n '/^tor_control() {$/,/^}$/p' tormarchy); \
+         tor_control 'GETINFO version' >/dev/null; echo "still heard" >&2; } 2>&1 )
+[[ $out == *"still heard"* ]] && ok "stderr still works after a control-port session" \
+  || bad "tor_control left stderr redirected for the rest of the process: $out"
+COOKIE_CANDIDATES=("${saved_candidates[@]}"); CONTROL_PORT=$saved_port
+kill "$control" 2>/dev/null
 
 echo
 echo "Exit countries"

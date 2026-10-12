@@ -363,6 +363,15 @@ then ok "the pasted text is only stored, cleared, and written to stdin"
 else bad "the pasted text is used somewhere other than stdin (see above)"; fi
 reject "the root helper takes no bridge file argument" tormarchy 'bridge set <file'
 want "the panel-readable summary is counts only" tormarchy 'bridge_counts "$BRIDGE_STASH" >"$staging"'
+want "setup brings an older bridge stash within the panel's reach" tormarchy 'chmod 0711 "$(dirname "$BRIDGE_STASH")"'
+
+# A bare exec applies its redirections to the whole process: one with
+# 2>/dev/null on it silences every later error message, die included.
+if grep -nE '^[[:space:]]*exec [0-9]+[<>&][^;]*2>/dev/null' tormarchy; then
+  bad "a bare exec redirects stderr for the rest of the process (above)"
+else
+  ok "no bare exec swallows stderr for the rest of the process"
+fi
 
 echo
 echo "The Omarchy menu"
