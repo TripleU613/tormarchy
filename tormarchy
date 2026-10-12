@@ -1923,11 +1923,17 @@ cmd_doctor() {
   # Every check is recorded once, then either printed as it is found -- the
   # terminal view, unchanged -- or kept for --json, which is what the panel's
   # leak check reads. One list of checks, so the two can never disagree.
-  local failures=0 group=""
-  local -a check_groups=() check_states=() check_texts=() check_details=()
+  # Each check also carries a stable id, set with `cid` just before it. The
+  # panel names a check by its id, in a word, and keeps the sentence for when
+  # it is hovered; the terminal prints the sentence as before.
+  local failures=0 group="" check_id=""
+  local -a check_groups=() check_states=() check_texts=() check_details=() check_ids=()
+  cid() { check_id=$1; }
   record() {
     local state=$1 text=$2 detail=${3:-}
     check_groups+=("$group") check_states+=("$state") check_texts+=("$text") check_details+=("$detail")
+    check_ids+=("$check_id")
+    check_id=""
     [[ $state == fail ]] && failures=$(( failures + 1 ))
     $json && return 0
     case $state in
@@ -1959,21 +1965,23 @@ cmd_doctor() {
 
   section "Tor daemon"
   if ! command -v tor >/dev/null 2>&1; then
-    fail "tor is not installed"
+    cid tor; fail "tor is not installed"
   elif ! tor_is_running; then
     # Stopped while disconnected is the correct idle state, not a fault: setup
     # deliberately leaves tor disabled at boot so a reboot always restores
     # normal networking. Only complain when something is meant to be running.
     if $connected; then
-      fail "rules are applied but tor.service is not running -- the network is blocked"
+      cid tor; fail "rules are applied but tor.service is not running -- the network is blocked"
     else
-      skip "tor is stopped, which is normal while disconnected"
+      cid tor; skip "tor is stopped, which is normal while disconnected"
     fi
   else
-    pass "tor.service is running"
+    cid tor; pass "tor.service is running"
     local pct cookie
     pct=$(bootstrap_progress) || pct=0
+    cid bootstrap
     (( pct >= 100 )) && pass "bootstrapped (100%)" || fail "bootstrap stalled at ${pct}%"
+    cid control
     if cookie=$(cookie_path); then
       pass "control cookie readable at $cookie"
     else
@@ -1988,9 +1996,10 @@ cmd_doctor() {
     # Nothing is routed system-wide here, so the one thing worth proving is the
     # thing browser-only does offer: that the proxy really leaves through Tor.
     if ! tor_is_running; then
-      skip "browser-only mode with tor stopped: there is no proxy to check"
+      cid proxy; skip "browser-only mode with tor stopped: there is no proxy to check"
     elif body=$(curl -sf -m 25 --socks5-hostname "127.0.0.1:$SOCKS_PORT" \
         https://check.torproject.org/api/ip 2>/dev/null); then
+      cid proxy
       if grep -q '"IsTor":true' <<<"$body"; then
         seen_ip=$(sed -n 's/.*"IP":"\([^"]*\)".*/\1/p' <<<"$body")
         pass "the SOCKS proxy on 127.0.0.1:$SOCKS_PORT leaves through Tor" \
@@ -1999,12 +2008,13 @@ cmd_doctor() {
         fail "check.torproject.org says the SOCKS proxy is NOT Tor"
       fi
     else
-      fail "could not reach check.torproject.org through the SOCKS proxy"
+      cid proxy; fail "could not reach check.torproject.org through the SOCKS proxy"
     fi
-    skip "browser-only mode: nothing else is routed system-wide, by design"
+    cid routing; skip "browser-only mode: nothing else is routed system-wide, by design"
   elif ! $connected; then
-    skip "not connected, so there is nothing to leak"
+    cid routing; skip "not connected, so there is nothing to leak"
   else
+    cid exit
     if body=$(curl -sf -m 25 https://check.torproject.org/api/ip 2>/dev/null); then
       if grep -q '"IsTor":true' <<<"$body"; then
         seen_ip=$(sed -n 's/.*"IP":"\([^"]*\)".*/\1/p' <<<"$body")
@@ -2018,23 +2028,27 @@ cmd_doctor() {
     fi
 
     # Success here is a leak.
+    cid ipv6
     if curl -6 -sf -m 8 https://ipv6.icanhazip.com >/dev/null 2>&1; then
       fail "IPv6 reached the internet directly -- this is a leak"
     else
       pass "IPv6 is blocked"
     fi
 
+    cid ipv6-stack
     if [[ $(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null) == 1 ]]; then
       pass "IPv6 stack is disabled in the kernel as well"
     else
       warn "IPv6 is filtered but the kernel stack is still up"
     fi
 
+    cid dns
     getent hosts example.com >/dev/null 2>&1 \
       && pass "DNS resolves (through Tor's DNSPort)" || fail "DNS is not resolving"
 
     # Forwarded traffic never passes the output hook, so none of the rules above
     # apply to it -- and it is invisible from here.
+    cid forwarding
     if [[ $(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null) == 1 ]]; then
       if (( EUID == 0 )); then
         if nft list chain inet "$NFT_TABLE" filter_forward >/dev/null 2>&1; then
@@ -2057,6 +2071,7 @@ cmd_doctor() {
   section "Clock"
   # Tor will not build circuits against a badly skewed clock, and the ruleset
   # drops NTP while connected -- so a long session can drift itself broken.
+  cid clock
   if timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -q yes; then
     pass "clock is NTP-synchronised"
   elif $connected; then
@@ -2069,7 +2084,7 @@ cmd_doctor() {
   if $json; then
     local i items=""
     for i in "${!check_states[@]}"; do
-      items+="${items:+,}{\"group\":\"$(json_escape "${check_groups[i]}")\",\"status\":\"${check_states[i]}\",\"text\":\"$(json_escape "${check_texts[i]}")\",\"detail\":\"$(json_escape "${check_details[i]}")\"}"
+      items+="${items:+,}{\"id\":\"$(json_escape "${check_ids[i]}")\",\"group\":\"$(json_escape "${check_groups[i]}")\",\"status\":\"${check_states[i]}\",\"text\":\"$(json_escape "${check_texts[i]}")\",\"detail\":\"$(json_escape "${check_details[i]}")\"}"
     done
     printf '{"ok":%s,"failures":%d,"checkedAt":"%s","mode":"%s","checks":[%s]}\n' \
       "$( (( failures == 0 )) && echo true || echo false)" "$failures" \

@@ -245,6 +245,9 @@ json=$(cmd_doctor --json); rc=$?
 python3 -c 'import json,sys; json.loads(sys.argv[1])' "$json" 2>/dev/null \
   && ok "doctor --json is valid JSON" || bad "doctor --json printed: $json"
 [[ $json != *$'\033'* ]] && ok "and carries no terminal colour codes" || bad "doctor --json has escape codes in it"
+is "every check carries the id the panel names it by" \
+  "$(python3 -c 'import json,sys; print(",".join(c["id"] for c in json.loads(sys.argv[1])["checks"]))' "$json" 2>/dev/null)" \
+  "tor,bootstrap,control,exit,ipv6,ipv6-stack,dns,forwarding,clock"
 is "a clean run reports ok" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["ok"], d["failures"])' "$json" 2>/dev/null)" "True 0"
 is "and exits 0" "$rc" 0
 is "the exit address is a check's detail" \

@@ -129,6 +129,8 @@ Panel {
     property string title: ""
     property string subtitle: ""
     property color subtitleColor: root.dim
+    // What the tool does, for the hover bubble. Never on the tile itself.
+    property string tip: ""
     signal activated()
 
     readonly property bool hot: tileMouse.containsMouse
@@ -188,6 +190,118 @@ Panel {
         root.cursorActive = true
         root.focusSection = tile.section
       }
+    }
+
+    PanelToolTip {
+      visible: tileMouse.containsMouse && tile.tip !== ""
+      text: tile.tip
+      fontFamily: root.fontFamily
+    }
+  }
+
+  // No sentences on the panel. A label says what something is; anything that
+  // explains or instructs goes in a hover bubble -- this dot where nothing else
+  // on screen can carry it.
+  component InfoDot: Text {
+    id: info
+    property string tip: ""
+    text: "\u{f02fd}"
+    color: infoMouse.containsMouse ? root.foreground : root.dim
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.body
+
+    MouseArea {
+      id: infoMouse
+      anchors.fill: parent
+      anchors.margins: -Style.space(4)
+      hoverEnabled: true
+      acceptedButtons: Qt.NoButton
+    }
+
+    PanelToolTip {
+      visible: infoMouse.containsMouse && info.tip !== ""
+      text: info.tip
+      fontFamily: root.fontFamily
+    }
+  }
+
+  // A message as one short line -- a warning, an error from the helper -- with
+  // the whole of it in the bubble. Helper errors run to two sentences, and a
+  // wrapped paragraph in red is exactly what this panel does not do.
+  component Brief: Text {
+    id: brief
+    property string full: ""
+    property string short: Model.brief(full)
+    visible: full !== ""
+    width: parent ? parent.width : implicitWidth
+    elide: Text.ElideRight
+    maximumLineCount: 1
+    textFormat: Text.PlainText
+    text: short
+    color: root.urgent
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
+
+    MouseArea {
+      id: briefMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.NoButton
+    }
+
+    PanelToolTip {
+      visible: briefMouse.containsMouse && brief.full !== brief.short
+      text: Model.wrapTip(brief.full)
+      fontFamily: root.fontFamily
+    }
+  }
+
+  // A result in a word, with a glyph for how it went and the detail on hover:
+  // a leak check, or a transport in the bridge set.
+  component Chip: Surface {
+    id: chip
+    property string glyph: ""
+    property string label: ""
+    property string tip: ""
+    property color tint: root.foreground
+    width: chipRow.implicitWidth + Style.space(16)
+    height: Style.space(26)
+    border.color: tint === root.urgent ? root.urgent : root.surfaceLine
+
+    Row {
+      id: chipRow
+      anchors.centerIn: parent
+      spacing: Style.space(5)
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        text: chip.glyph
+        color: chip.tint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        text: chip.label
+        textFormat: Text.PlainText
+        color: chip.tint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+    }
+
+    MouseArea {
+      id: chipMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.NoButton
+    }
+
+    PanelToolTip {
+      visible: chipMouse.containsMouse && chip.tip !== ""
+      text: chip.tip
+      fontFamily: root.fontFamily
     }
   }
 
@@ -667,15 +781,9 @@ Panel {
             // tor gone, the network shut on purpose. The switch still reads ON
             // then, correctly, and without this nothing on screen explained why
             // the machine had gone quiet.
-            Text {
-              width: parent.width
-              visible: text !== ""
-              wrapMode: Text.WordWrap
-              textFormat: Text.PlainText
-              text: tor.warnings.length > 0 ? String(tor.warnings[0]) : ""
-              color: root.urgent
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
+            Brief {
+              full: tor.warnings.length > 0 ? String(tor.warnings[0]) : ""
+              short: Model.briefWarning(full)
             }
 
             // Band 2 -- two paired surfaces of identical height and border:
@@ -753,7 +861,7 @@ Panel {
                       horizontalAlignment: Text.AlignHCenter
                       elide: Text.ElideRight
                       visible: text !== ""
-                      text: tor.speedError !== "" ? tor.speedError
+                      text: tor.speedError !== "" ? Model.brief(tor.speedError, 22)
                         : (tor.measuringSpeed ? qsTr("Measuring…") : Model.latencyVerdict(tor.latencyMs))
                       color: tor.speedError !== "" ? root.urgent : root.dim
                       font.family: root.fontFamily
@@ -925,10 +1033,11 @@ Panel {
                 glyphColor: Model.doctorOverall(tor.leakResult) === "fail" ? root.urgent : root.foreground
                 title: qsTr("Leak check")
                 subtitle: tor.checkingLeaks ? qsTr("Checking…")
-                  : (tor.leakError !== "" ? tor.leakError
+                  : (tor.leakError !== "" ? Model.brief(tor.leakError, 24)
                   : (tor.leakResult ? Model.doctorSummary(tor.leakResult) + " · " + Model.formatAgo((root.now - tor.leakCheckedAtMs) / 1000)
-                  : qsTr("Prove nothing gets past Tor")))
+                  : qsTr("Not run yet")))
                 subtitleColor: tor.leakError !== "" ? root.urgent : root.dim
+                tip: Model.wrapTip(qsTr("Asks check.torproject.org whether you are coming from Tor, tries an IPv6 host directly, and checks DNS, forwarding and the clock. Runs only when you ask, and takes up to half a minute."))
                 onActivated: root.openLeakCheck()
               }
 
@@ -938,92 +1047,36 @@ Panel {
                 glyph: "󰘘"
                 title: qsTr("Bridges")
                 subtitle: Model.bridgeStateLabel(tor.bridgeState, tor.bridgeDetail)
+                tip: Model.wrapTip(qsTr("For networks that block Tor. Paste bridge lines from the clipboard to use them."))
                 onActivated: root.toggleTool("bridges")
               }
             }
 
-            // The leak check's results, one line per check, grouped the way
-            // `tormarchy doctor` prints them in a terminal.
+            // The leak check's results: one chip per check, named in a word,
+            // with what it found in the bubble.
             Column {
               id: leakDetail
               visible: root.expandedTool === "leaks"
               width: parent.width
-              spacing: Style.space(4)
+              spacing: Style.space(8)
 
-              Repeater {
-                model: tor.leakResult ? tor.leakResult.checks : []
+              Flow {
+                visible: !!tor.leakResult
+                width: parent.width
+                spacing: Style.space(6)
 
-                Column {
-                  required property var modelData
-                  required property int index
+                Repeater {
+                  model: tor.leakResult ? tor.leakResult.checks : []
 
-                  width: leakDetail.width
-                  spacing: Style.space(2)
-
-                  readonly property bool newGroup: index === 0
-                    || tor.leakResult.checks[index - 1].group !== modelData.group
-
-                  Text {
-                    visible: parent.newGroup
-                    topPadding: parent.index === 0 ? 0 : Style.space(4)
-                    text: String(parent.modelData.group).toUpperCase()
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.letterSpacing: 0.8
-                  }
-
-                  Row {
-                    width: parent.width
-                    spacing: Style.space(8)
-
-                    Text {
-                      id: checkGlyph
-                      width: Style.space(14)
-                      text: Model.doctorGlyph(modelData.status)
-                      color: modelData.status === "fail" ? root.urgent
-                        : (modelData.status === "skip" ? root.dim : root.foreground)
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
-                    }
-
-                    Column {
-                      width: parent.width - checkGlyph.width - parent.spacing
-
-                      Text {
-                        width: parent.width
-                        wrapMode: Text.WordWrap
-                        textFormat: Text.PlainText
-                        text: modelData.text
-                        color: modelData.status === "fail" ? root.urgent
-                          : (modelData.status === "skip" ? root.dim : root.foreground)
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.bodySmall
-                      }
-
-                      Text {
-                        visible: text !== ""
-                        width: parent.width
-                        wrapMode: Text.WordWrap
-                        textFormat: Text.PlainText
-                        text: modelData.detail
-                        color: root.dim
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.caption
-                      }
-                    }
+                  Chip {
+                    required property var modelData
+                    glyph: Model.doctorGlyph(modelData.status)
+                    label: Model.checkLabel(modelData)
+                    tip: Model.checkTip(modelData)
+                    tint: modelData.status === "fail" ? root.urgent
+                      : (modelData.status === "skip" ? root.dim : root.foreground)
                   }
                 }
-              }
-
-              Text {
-                visible: tor.checkingLeaks
-                width: parent.width
-                wrapMode: Text.WordWrap
-                text: qsTr("Asking check.torproject.org and trying IPv6 directly. Up to half a minute.")
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
               }
 
               Button {
@@ -1037,152 +1090,95 @@ Panel {
               }
             }
 
-            // Bridges: what is set up, whether this machine can run it, and a
-            // way to change it that never puts a bridge line on a command line.
-            // A paste is read straight off the clipboard, shown as counts for a
-            // yes or no, and handed to tormarchy over stdin.
+            // Bridges: what is set up and whether this machine can run it, then
+            // a way to change it that never puts a bridge line on a command
+            // line. A paste is read straight off the clipboard, shown as counts
+            // for a yes or no, and handed to tormarchy over stdin.
             Column {
               id: bridgeSection
               visible: root.expandedTool === "bridges"
               width: parent.width
-              spacing: Style.space(6)
+              spacing: Style.space(8)
 
               readonly property var current: tor.bridgeDetail
               readonly property var preview: tor.bridgePreview
               readonly property var missing: Model.missingTransports(preview)
               readonly property bool canApply: !!preview && missing.length === 0
                 && preview.invalidLines === 0 && !tor.busy && !tor.bridgeWorking
+              // The paste on its way in, else the set already saved.
+              readonly property var shown: preview ? preview : (current && current.ok ? current : null)
 
               Text {
-                visible: !bridgeSection.preview
-                width: parent.width
-                wrapMode: Text.WordWrap
-                text: tor.bridgeState === "active" ? qsTr("Tor reaches the network through these bridges.")
-                  : (tor.bridgeState === "stashed" ? qsTr("Saved bridges are switched off. Tor connects directly.")
-                  : qsTr("No bridges. Tor connects to the network directly, which is fine unless it is blocked where you are."))
+                visible: !!bridgeSection.preview
+                text: qsTr("Pasted · %1").arg(Model.bridgeCountText(bridgeSection.preview))
                 color: root.foreground
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: Style.font.body
               }
 
-              // The saved set, one transport per line. A transport this machine
-              // cannot run is the usual reason bridges "do nothing", so it says
-              // what to install right where it is listed.
-              Repeater {
-                model: !bridgeSection.preview && bridgeSection.current && bridgeSection.current.ok
-                  ? bridgeSection.current.transports : []
-
-                Row {
-                  required property var modelData
-                  width: bridgeSection.width
-                  spacing: Style.space(8)
-
-                  Text {
-                    id: transportGlyph
-                    width: Style.space(14)
-                    text: Model.doctorGlyph(modelData.available ? "pass" : "fail")
-                    color: modelData.available ? root.foreground : root.urgent
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
-                  }
-
-                  Text {
-                    width: parent.width - transportGlyph.width - parent.spacing
-                    wrapMode: Text.WordWrap
-                    textFormat: Text.PlainText
-                    text: modelData.available
-                      ? qsTr("%1 %2").arg(modelData.count).arg(modelData.name)
-                      : qsTr("%1 %2 · not installed: %3").arg(modelData.count).arg(modelData.name).arg(modelData.installHint)
-                    color: modelData.available ? root.foreground : root.urgent
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                  }
-                }
-              }
-
-              // What the paste holds, before anything is changed.
-              Column {
-                visible: !!bridgeSection.preview
+              // One chip per transport. One this machine cannot run is the
+              // usual reason bridges "do nothing", so it is marked where it is
+              // listed, with what to install in its bubble.
+              Flow {
+                visible: !!bridgeSection.shown && (bridgeSection.shown.transports.length > 0
+                  || bridgeSection.shown.invalidLines > 0)
                 width: parent.width
-                spacing: Style.space(4)
-
-                Text {
-                  width: parent.width
-                  wrapMode: Text.WordWrap
-                  text: qsTr("From the clipboard: %1").arg(Model.bridgeCountText(bridgeSection.preview))
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                }
+                spacing: Style.space(6)
 
                 Repeater {
-                  model: bridgeSection.missing
+                  model: bridgeSection.shown ? bridgeSection.shown.transports : []
 
-                  Text {
+                  Chip {
                     required property var modelData
-                    width: bridgeSection.width
-                    wrapMode: Text.WordWrap
-                    textFormat: Text.PlainText
-                    text: qsTr("%1 · not installed: %2").arg(modelData.name).arg(modelData.installHint)
-                    color: root.urgent
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
+                    glyph: Model.doctorGlyph(modelData.available ? "pass" : "fail")
+                    label: qsTr("%1 %2").arg(modelData.count).arg(modelData.name)
+                    tint: modelData.available ? root.foreground : root.urgent
+                    tip: modelData.available ? ""
+                      : Model.wrapTip(qsTr("%1 is not installed. Install it with: %2").arg(modelData.name).arg(modelData.installHint))
                   }
                 }
 
-                Text {
+                Chip {
                   visible: !!bridgeSection.preview && bridgeSection.preview.invalidLines > 0
-                  width: parent.width
-                  wrapMode: Text.WordWrap
-                  text: bridgeSection.preview && bridgeSection.preview.invalidLines === 1
-                    ? qsTr("1 line is not a bridge line. Copy only the lines that start with a transport, then paste again.")
-                    : qsTr("%1 lines are not bridge lines. Copy only the lines that start with a transport, then paste again.")
-                        .arg(bridgeSection.preview ? bridgeSection.preview.invalidLines : 0)
-                  color: root.urgent
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-
-                Row {
-                  spacing: Style.space(8)
-
-                  Button {
-                    text: qsTr("Use these")
-                    bordered: true
-                    focusable: false
-                    enabled: bridgeSection.canApply
-                    opacity: enabled ? 1 : 0.4
-                    foreground: root.foreground
-                    fontFamily: root.fontFamily
-                    onClicked: tor.applyBridges()
-                  }
-
-                  Button {
-                    text: qsTr("Cancel")
-                    focusable: false
-                    foreground: root.foreground
-                    fontFamily: root.fontFamily
-                    onClicked: tor.cancelBridges()
-                  }
+                  glyph: Model.doctorGlyph("fail")
+                  label: bridgeSection.preview && bridgeSection.preview.invalidLines === 1
+                    ? qsTr("1 invalid line")
+                    : qsTr("%1 invalid lines").arg(bridgeSection.preview ? bridgeSection.preview.invalidLines : 0)
+                  tint: root.urgent
+                  tip: Model.wrapTip(qsTr("Copy only the lines that start with a transport, like obfs4, then paste again."))
                 }
               }
 
-              Text {
-                visible: tor.bridgeMessage !== ""
-                width: parent.width
-                wrapMode: Text.WordWrap
-                textFormat: Text.PlainText
-                text: tor.bridgeMessage
-                color: root.urgent
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+              Brief {
+                full: tor.bridgeMessage
               }
 
               Row {
-                visible: !bridgeSection.preview
                 spacing: Style.space(8)
 
                 Button {
+                  visible: !!bridgeSection.preview
+                  text: qsTr("Use these")
+                  bordered: true
+                  focusable: false
+                  enabled: bridgeSection.canApply
+                  opacity: enabled ? 1 : 0.4
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: tor.applyBridges()
+                }
+
+                Button {
+                  visible: !!bridgeSection.preview
+                  text: qsTr("Cancel")
+                  focusable: false
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: tor.cancelBridges()
+                }
+
+                Button {
+                  visible: !bridgeSection.preview
                   text: tor.bridgeWorking ? qsTr("Reading…") : qsTr("Paste bridges")
                   bordered: true
                   focusable: false
@@ -1194,7 +1190,7 @@ Panel {
                 }
 
                 Button {
-                  visible: tor.bridgeState !== "off"
+                  visible: !bridgeSection.preview && tor.bridgeState !== "off"
                   text: tor.bridgeState === "active" ? qsTr("Turn off") : qsTr("Turn on")
                   focusable: false
                   enabled: !tor.busy && !tor.bridgeWorking
@@ -1203,16 +1199,11 @@ Panel {
                   fontFamily: root.fontFamily
                   onClicked: tor.setBridgesEnabled(tor.bridgeState !== "active")
                 }
-              }
 
-              Text {
-                visible: !bridgeSection.preview
-                width: parent.width
-                wrapMode: Text.WordWrap
-                text: qsTr("Get bridges from bridges.torproject.org or @GetBridgesBot on Telegram, copy them, then paste.")
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
+                InfoDot {
+                  anchors.verticalCenter: parent.verticalCenter
+                  tip: Model.wrapTip(qsTr("Get bridges at bridges.torproject.org or from @GetBridgesBot on Telegram. Copy the lines, then paste them here."))
+                }
               }
             }
           }
@@ -1238,34 +1229,10 @@ Panel {
               maxWidth: setupHero.width
             }
 
-            Column {
-              width: parent.width
-              spacing: Style.space(4)
-
-              Text {
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.WordWrap
-                text: qsTr("One-time setup, then it's a toggle.")
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-              }
-
-              Text {
-                width: parent.width
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.WordWrap
-                text: qsTr("Installs tor and the helper in a terminal with sudo, so the switch never asks for a password.")
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-            }
-
             Button {
               width: parent.width
               text: qsTr("Run setup")
+              tooltipText: Model.wrapTip(qsTr("Once, in a terminal with sudo: installs tor and the helper. After that the switch never asks for a password."))
               bordered: true
               focusable: false
               hasCursor: root.cursorActive && root.focusSection === "setup"
@@ -1377,7 +1344,7 @@ Panel {
 
                     PanelToolTip {
                       visible: segmentHover.containsMouse
-                      text: Model.modeTooltip(modelData)
+                      text: Model.wrapTip(Model.modeTooltip(modelData))
                     }
                   }
                 }
@@ -1396,14 +1363,8 @@ Panel {
           // two differ. tormarchy-panic still exists as a command, which is
           // where it belongs: its entire purpose is being reachable when the
           // network is down and this panel is not an option.
-          Text {
-            visible: tor.lastError !== ""
-            width: parent.width
-            wrapMode: Text.WordWrap
-            text: tor.lastError
-            color: root.urgent
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
+          Brief {
+            full: tor.lastError
           }
         }
       }

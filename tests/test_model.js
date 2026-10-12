@@ -141,7 +141,7 @@ is(formatAgo(150), "2 min ago", "minutes ago");
 
 // Bridges, as the tile and the paste preview state them.
 const check = parseBridgeReport(fs.readFileSync(path.join(__dirname, "qml", "fixtures", "bridge-check-missing.json"), "utf8"));
-is(bridgeCountText(check), "3 bridges: 2 obfs4, 1 webtunnel", "the preview counts the paste by transport");
+is(bridgeCountText(check), "3 bridges", "the preview counts the paste; its transports are chips beneath");
 is(missingTransports(check).map(t => t.name).join(","), "obfs4,webtunnel", "transports this machine lacks are named");
 is(bridgeCountText(parseBridgeReport('{"count":0,"transports":[]}')), "No bridge lines", "an empty paste says so");
 is(parseBridgeReport("not json").ok, false, "unreadable bridge output is not a report");
@@ -172,7 +172,7 @@ for (const policy of ["problems", "all"]) {
 is(head(notificationFor("connecting", "routed", "problems")), "none", "problems: a connect succeeding is not announced");
 is(head(notificationFor("connecting", "routed", "all", { exitCountryName: "Germany" })), "Connected through Tor",
   "all: a connect succeeding is");
-is(String(notificationFor("connecting", "routed", "all", { exitCountryName: "Germany" }).body), "Leaving from Germany.",
+is(String(notificationFor("connecting", "routed", "all", { exitCountryName: "Germany" }).body), "Leaving from Germany",
   "with where it leaves from");
 is(head(notificationFor("connecting", "browser", "all")), "Tor is ready", "all: browser-only being ready is announced");
 is(head(notificationFor("routed", "blocked", "off")), "none", "off: not even the kill switch");
@@ -187,6 +187,35 @@ is(argv.indexOf("notify-send"), -1, "never notify-send");
 is(argv.slice(argv.indexOf("-r"), argv.indexOf("-r") + 2).join(" "), "-r 7", "a toast id replaces the previous toast");
 is(argv.slice(-4).join(" "), "--exec omarchy-shell tripleu.tor open", "clicking a toast opens the panel, and --exec is last");
 is(notificationArgv({ headline: "h", glyph: "g" }, "7; rm -rf /").indexOf("-r"), -1, "a replace id that is not a number is dropped");
+
+// Copy. The panel shows labels; a message from the helper is cut to its first
+// clause for the panel and wrapped whole for the bubble.
+is(brief("tormarchy: tor stalled at 40% bootstrap. No rules applied, networking is unchanged."),
+  "Tor stalled at 40% bootstrap", "a helper error is cut to its first clause");
+is(brief("could not reach tor's control port on 127.0.0.1:9051: Permission denied").length <= 32, true,
+  "and never past a label's length");
+is(brief("could not reach tor's control port on 127.0.0.1:9051: Permission denied").slice(-1), "\u2026",
+  "with an ellipsis where it was cut");
+is(brief(""), "", "nothing stays nothing");
+is(briefWarning("Tor has stopped, so the kill switch is holding the network shut. Turn Tormarchy off to get it back."),
+  "Kill switch holding", "the kill-switch warning is a label");
+is(briefWarning("Tor is still bootstrapping at 40%."), "Reconnecting \u00b7 40%", "and so is a reconnect");
+const wrapped = wrapTip("Asks check.torproject.org whether you are coming from Tor, tries an IPv6 host directly, and checks DNS.");
+is(wrapped.split("\n").every(l => l.length <= 46), true, "a bubble's text is wrapped to lines it can hold");
+is(wrapped.replace(/\n/g, " "), "Asks check.torproject.org whether you are coming from Tor, tries an IPv6 host directly, and checks DNS.",
+  "without losing a word");
+is(checkLabel({ id: "ipv6-stack", text: "IPv6 stack is disabled in the kernel as well" }), "IPv6 stack",
+  "a leak check is named in a word");
+is(checkLabel({ id: "", text: "something new the panel does not know" }).length <= 16, true,
+  "an unknown check still gets a short name");
+is(checkTip({ text: "check.torproject.org confirms this connection is Tor", detail: "exit as seen from outside: 1.2.3.4" }).indexOf("1.2.3.4") > 0,
+  true, "and its sentence and detail are its bubble");
+is(parseDoctor(fs.readFileSync(path.join(__dirname, "qml", "fixtures", "doctor-pass.json"), "utf8")).checks[0].id, "tor",
+  "the check's id survives parsing");
+for (const n of [notificationFor("routed", "blocked", "problems"), notificationFor("blocked", "routed", "problems"),
+                 connectFailedNotification("tor stalled at 40% bootstrap. No rules applied, networking is unchanged.", "problems")]) {
+  is(String(n.body).length <= 40, true, `the "${n.headline}" toast says it in a few words`);
+}
 
 console.log(failures === 0
   ? "  ok    Model.js behaves"

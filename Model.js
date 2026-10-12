@@ -372,6 +372,7 @@ function parseDoctor(raw) {
   for (var i = 0; i < data.checks.length; i++) {
     var c = data.checks[i] || {}
     checks.push({
+      id: String(c.id || ""),
       group: String(c.group || ""),
       // An unknown state is shown as skipped rather than trusted: a check this
       // panel does not understand must not render as a pass.
@@ -490,7 +491,7 @@ function notificationFor(prev, next, policy, context) {
   if (next === "blocked") {
     return {
       headline: qsTr("Kill switch engaged"),
-      body: qsTr("Tor stopped, so the network is blocked. Turn Tormarchy off to get it back."),
+      body: qsTr("Network blocked until Tor is back"),
       urgency: "critical",
       glyph: "󰻌"
     }
@@ -500,7 +501,7 @@ function notificationFor(prev, next, policy, context) {
   if (prev === "blocked" && next === "routed") {
     return {
       headline: qsTr("Tor is back"),
-      body: qsTr("Traffic is going through Tor again."),
+      body: qsTr("Traffic is routed again"),
       urgency: "normal",
       glyph: "󰕥"
     }
@@ -508,7 +509,7 @@ function notificationFor(prev, next, policy, context) {
   if (prev === "blocked") {
     return {
       headline: qsTr("Network restored"),
-      body: qsTr("Tormarchy is off, so traffic no longer goes through Tor."),
+      body: qsTr("Tormarchy is off"),
       urgency: "low",
       glyph: "󰦞"
     }
@@ -519,7 +520,7 @@ function notificationFor(prev, next, policy, context) {
     var where = String(ctx.exitCountryName || "")
     return {
       headline: qsTr("Connected through Tor"),
-      body: where !== "" ? qsTr("Leaving from %1.").arg(where) : qsTr("All traffic now goes through Tor."),
+      body: where !== "" ? qsTr("Leaving from %1").arg(where) : qsTr("All traffic via Tor"),
       urgency: "low",
       glyph: "󰕥"
     }
@@ -527,7 +528,7 @@ function notificationFor(prev, next, policy, context) {
   if (next === "browser") {
     return {
       headline: qsTr("Tor is ready"),
-      body: qsTr("Browser-only: launch a browser with tormarchy browser."),
+      body: qsTr("Browser-only proxy is up"),
       urgency: "low",
       glyph: "󰇧"
     }
@@ -540,7 +541,7 @@ function connectFailedNotification(error, policy) {
   if (notificationPolicy(policy) === "off") return null
   return {
     headline: qsTr("Couldn't connect to Tor"),
-    body: elide(error, 200) || qsTr("Networking is unchanged."),
+    body: brief(error, 40) || qsTr("Network unchanged"),
     urgency: "normal",
     glyph: "󰀨"
   }
@@ -552,7 +553,7 @@ function bridgesNotification(prevState, nextState, policy, userAction) {
   if (nextState !== "active" || prevState === "active") return null
   return {
     headline: qsTr("Using bridges"),
-    body: qsTr("This network seems to block Tor, so Tormarchy switched to your saved bridges."),
+    body: qsTr("This network blocks Tor"),
     urgency: "low",
     glyph: "󰘘"
   }
@@ -600,15 +601,10 @@ function parseBridgeReport(raw) {
   }
 }
 
-// "4 bridges: 2 obfs4, 1 webtunnel, 1 plain"
+// "4 bridges", the breakdown by transport listed beneath it.
 function bridgeCountText(report) {
   if (!report || !report.ok || report.count === 0) return qsTr("No bridge lines")
-  var parts = []
-  for (var i = 0; i < report.transports.length; i++) {
-    parts.push(report.transports[i].count + " " + report.transports[i].name)
-  }
-  var head = report.count === 1 ? qsTr("1 bridge") : qsTr("%1 bridges").arg(report.count)
-  return parts.length ? head + ": " + parts.join(", ") : head
+  return report.count === 1 ? qsTr("1 bridge") : qsTr("%1 bridges").arg(report.count)
 }
 
 function missingTransports(report) {
@@ -618,4 +614,83 @@ function missingTransports(report) {
     if (!report.transports[i].available) out.push(report.transports[i])
   }
   return out
+}
+
+// ---- copy ------------------------------------------------------------------
+//
+// The panel shows labels, never sentences. Anything that explains goes in a
+// hover bubble instead, and these make the two halves: a short form for the
+// panel, and the whole text wrapped for the bubble, since the shell's tooltip
+// draws a single line however long it is.
+
+var BRIEF_LIMIT = 32
+
+// The first clause of a message, capped: "tor stalled at 40% bootstrap. No
+// rules applied, ..." reads "Tor stalled at 40% bootstrap".
+function brief(text, limit) {
+  var max = Number(limit) > 0 ? Number(limit) : BRIEF_LIMIT
+  var s = String(text || "").replace(/\s+/g, " ").trim().replace(/^tormarchy:\s*/i, "")
+  var cut = s.search(/(\.\s|\s--\s|;\s|:\s)/)
+  if (cut > 0) s = s.slice(0, cut)
+  s = s.replace(/[.:;]+$/, "")
+  if (s.length > max) {
+    var head = s.slice(0, max - 1)
+    var space = head.lastIndexOf(" ")
+    s = (space > max / 2 ? head.slice(0, space) : head) + "\u2026"
+  }
+  return s.length > 0 ? s.charAt(0).toUpperCase() + s.slice(1) : ""
+}
+
+// Word-wrapped to lines a bubble can hold.
+function wrapTip(text, width) {
+  var max = Number(width) > 0 ? Number(width) : 46
+  var out = []
+  var paragraphs = String(text || "").split("\n")
+  for (var p = 0; p < paragraphs.length; p++) {
+    var words = paragraphs[p].split(/\s+/).filter(function(w) { return w !== "" })
+    var line = ""
+    for (var i = 0; i < words.length; i++) {
+      if (line !== "" && line.length + 1 + words[i].length > max) {
+        out.push(line)
+        line = words[i]
+      } else {
+        line = line === "" ? words[i] : line + " " + words[i]
+      }
+    }
+    if (line !== "") out.push(line)
+  }
+  return out.join("\n")
+}
+
+// A status warning as a label. The two the helper sends get their own words;
+// anything else is cut to its first clause.
+function briefWarning(text) {
+  var s = String(text || "")
+  if (/kill switch/i.test(s)) return qsTr("Kill switch holding")
+  var m = /bootstrapping at (\d+)%/i.exec(s)
+  if (m) return qsTr("Reconnecting \u00b7 %1%").arg(m[1])
+  return brief(s)
+}
+
+// What each leak check is called on the panel. The full sentence is its bubble.
+function checkLabel(check) {
+  switch (String((check && check.id) || "")) {
+  case "tor": return qsTr("Tor")
+  case "bootstrap": return qsTr("Bootstrap")
+  case "control": return qsTr("Control port")
+  case "proxy": return qsTr("Proxy")
+  case "routing": return qsTr("Routing")
+  case "exit": return qsTr("Exit")
+  case "ipv6": return qsTr("IPv6")
+  case "ipv6-stack": return qsTr("IPv6 stack")
+  case "dns": return qsTr("DNS")
+  case "forwarding": return qsTr("Forwarding")
+  case "clock": return qsTr("Clock")
+  default: return brief(check ? check.text : "", 16)
+  }
+}
+
+function checkTip(check) {
+  if (!check) return ""
+  return wrapTip(String(check.text || "") + (check.detail ? "\n" + check.detail : ""))
 }

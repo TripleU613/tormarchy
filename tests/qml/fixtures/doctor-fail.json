@@ -5,54 +5,63 @@
  "mode": "lan",
  "checks": [
   {
+   "id": "tor",
    "group": "Tor daemon",
    "status": "pass",
    "text": "tor.service is running",
    "detail": ""
   },
   {
+   "id": "bootstrap",
    "group": "Tor daemon",
    "status": "pass",
    "text": "bootstrapped (100%)",
    "detail": ""
   },
   {
+   "id": "control",
    "group": "Tor daemon",
    "status": "pass",
    "text": "control cookie readable at /run/tormarchy/control.cookie",
    "detail": ""
   },
   {
+   "id": "exit",
    "group": "Routing",
    "status": "pass",
    "text": "check.torproject.org confirms this connection is Tor",
    "detail": "exit as seen from outside: 185.220.101.4"
   },
   {
+   "id": "ipv6",
    "group": "Routing",
    "status": "fail",
    "text": "IPv6 reached the internet directly -- this is a leak",
    "detail": ""
   },
   {
+   "id": "ipv6-stack",
    "group": "Routing",
    "status": "pass",
    "text": "IPv6 stack is disabled in the kernel as well",
    "detail": ""
   },
   {
+   "id": "dns",
    "group": "Routing",
    "status": "pass",
    "text": "DNS resolves (through Tor's DNSPort)",
    "detail": ""
   },
   {
+   "id": "forwarding",
    "group": "Routing",
    "status": "pass",
    "text": "IP forwarding is off, so nothing routes through this machine",
    "detail": ""
   },
   {
+   "id": "clock",
    "group": "Clock",
    "status": "pass",
    "text": "clock is NTP-synchronised",

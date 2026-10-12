@@ -325,6 +325,28 @@ reject "the root helper takes no bridge file argument" tormarchy 'bridge set <fi
 want "the panel-readable summary is counts only" tormarchy 'bridge_counts "$BRIDGE_STASH" >"$staging"'
 
 echo
+echo "Panel copy"
+
+# Labels on the panel, never sentences: anything that explains or instructs is
+# a hover bubble. So a string longer than a label may only appear where it is
+# given to a tooltip.
+if python3 - <<'PY'
+import re, sys
+bad = []
+for n, line in enumerate(open("Panel.qml"), 1):
+    for text in re.findall(r'qsTr\("((?:[^"\\]|\\.)*)"\)', line):
+        if len(text) > 32 and not re.search(r"\b(tip|tooltipText)\s*:|wrapTip\(", line):
+            bad.append(f"    Panel.qml:{n}: {text}")
+if bad:
+    print("\n".join(bad))
+    sys.exit(1)
+PY
+then ok "no string on the panel is longer than a label, unless it is a bubble's"
+else bad "a sentence is on the panel itself (above); put it in a tooltip"; fi
+want "messages from the helper are shown cut to one line" Panel.qml "component Brief: Text {"
+want "and wrapped for their bubble, which draws one line however long" Panel.qml "text: Model.wrapTip(brief.full)"
+
+echo
 if (( failures == 0 )); then
   echo "  all decisions still hold"
 else
