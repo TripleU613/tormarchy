@@ -85,6 +85,32 @@ Item {
     }
   }
 
+  // Bridges: "active" | "stashed" | "off", from the status poll, plus what the
+  // bridge tool last read about them (transport names and counts, never lines).
+  property string bridgeState: "off"
+  property var bridgeDetail: null
+
+  // A paste on its way in: read from the clipboard, previewed by `bridge check`,
+  // applied by `bridge set`. The text is only ever in memory and goes to
+  // tormarchy over stdin -- never argv, where every process on the machine can
+  // read it, and never a file -- and it is dropped on apply, on cancel, and
+  // whenever the panel closes.
+  property var bridgePreview: null
+  property string bridgeMessage: ""
+  readonly property bool bridgeWorking: (!!clipboardProcess && clipboardProcess.running)
+    || (!!bridgeCheckProcess && bridgeCheckProcess.running)
+    || (!!bridgeSetProcess && bridgeSetProcess.running)
+  property string _pendingBridgeText: ""
+
+  // The leak check. Run only when asked, never on a timer: each run makes real
+  // requests -- check.torproject.org, and a deliberate attempt to reach an IPv6
+  // host directly -- and the same rule as the latency gauge applies. Traffic
+  // nobody asked for is a pattern this tool should not add on anyone's behalf.
+  property bool checkingLeaks: false
+  property var leakResult: null
+  property double leakCheckedAtMs: 0
+  property string leakError: ""
+
   // Countries Tor currently has usable exit relays in. Loaded on demand, not
   // polled: it costs a walk of the whole consensus, and it barely changes.
   property var exitCountries: []
@@ -103,14 +129,19 @@ Item {
   // every refresh -- an intermittent "the switch didn't take" that had nothing
   // to do with any action. `refreshing` already covers the poll for anything
   // that genuinely wants to know a status read is happening.
-  readonly property bool busy: actionProcess.running || cancelProcess.running
+  // Guarded because bindings are re-evaluated while the Service is torn down --
+  // every plugin reload -- after the processes are already gone, and an
+  // unguarded read logs a TypeError into the shell's log each time.
+  readonly property bool busy: (!!actionProcess && actionProcess.running) || (!!cancelProcess && cancelProcess.running)
+    || (!!bridgeSetProcess && bridgeSetProcess.running)
 
   // A connect spends most of its life waiting for tor to bootstrap -- up to two
   // minutes, four if it falls back to bridges -- and the switch refused every
   // click for all of it, so there was no way to change your mind. Turning it
   // off during that wait now cancels: disconnect stops tor, connect sees tor go
   // and gives up without applying anything.
-  readonly property bool canToggle: !busy || (actionProcess.running && _desired === 1 && !cancelProcess.running)
+  readonly property bool canToggle: !busy
+    || (!!actionProcess && actionProcess.running && _desired === 1 && !!cancelProcess && !cancelProcess.running)
 
   // Whether there is a circuit worth measuring. Two things have to agree: the
   // switch says on (`active`, so flipping it off stops the gauge that same
@@ -203,6 +234,98 @@ Item {
     if (_desired !== -1 && liveConnection === (_desired === 1)) _desired = -1
     statusText = parsed.statusText !== "" ? parsed.statusText : Model.stateLabel(root)
     lastError = ""
+    if (parsed.bridges !== undefined) {
+      var nextBridges = parsed.bridges
+      // Not on the first reading: bridges already on when the shell starts were
+      // switched on some other time, not just now.
+      if (_notifiedState !== "")
+        notify(Model.bridgesNotification(bridgeState, nextBridges, notificationPolicy, _bridgeActionPending))
+      // Only on a change: the detail is a local file read, but it is not part
+      // of the poll and has no business running on every one.
+      var bridgesChanged = nextBridges !== bridgeState || (nextBridges !== "off" && bridgeDetail === null)
+      bridgeState = nextBridges
+      if (bridgesChanged) loadBridgeDetail()
+    }
+    noteConnectionState()
+  }
+
+  // ---- notifications -----------------------------------------------------
+  //
+  // What deserves a toast is decided in Model.js; this only feeds it states and
+  // sends what it returns. Evaluated once a status has been applied in full,
+  // never from a property change handler: the fields land one at a time, and
+  // between "tor stopped" and "rules gone" the half-applied status reads as the
+  // kill switch holding -- a false alarm on every ordinary disconnect.
+  readonly property string notificationPolicy: Model.notificationPolicy(setting("notifications", "problems"))
+  property bool notificationsAvailable: true
+  property string _notifiedState: ""
+  property double _blockedSinceMs: 0
+  property string _toastId: ""
+  property var _queuedNotification: null
+  property bool _bridgeActionPending: false
+
+  function noteConnectionState() {
+    var next = Model.connectionState({
+      installed: installed, connected: connected, torRunning: torRunning,
+      mode: effectiveMode, bootstrapping: bootstrapping
+    })
+    // The first reading after the shell starts is where things stand, not a
+    // change: a machine that boots with the kill switch holding has already
+    // been told, by whatever it was doing when it went down.
+    if (_notifiedState === "") {
+      _notifiedState = next
+      return
+    }
+    if (next === _notifiedState) {
+      _blockedSinceMs = 0
+      return
+    }
+    // tor is briefly not running while it restarts -- a bridge change, an
+    // exit change falling back to a restart -- and that is not the kill switch
+    // holding. Only a "blocked" that is still there a poll later is real.
+    if (next === "blocked") {
+      if (_blockedSinceMs === 0) {
+        _blockedSinceMs = Date.now()
+        return
+      }
+      if (Date.now() - _blockedSinceMs < 4000) return
+    }
+    _blockedSinceMs = 0
+    var n = Model.notificationFor(_notifiedState, next, notificationPolicy, { exitCountryName: exitCountryName })
+    _notifiedState = next
+    notify(n)
+  }
+
+  function notify(n) {
+    if (!n || !notificationsAvailable) return
+    // One at a time, newest wins. Each send replaces the previous toast, so a
+    // burst of changes ends as one toast saying where things now stand.
+    if (notifyProcess.running) {
+      _queuedNotification = n
+      return
+    }
+    notifyProcess.command = Model.notificationArgv(n, _toastId)
+    notifyProcess.running = true
+  }
+
+  Process {
+    id: notifyProcess
+    running: false
+    command: []
+    stdout: StdioCollector { id: notifyStdout; waitForEnd: true }
+    onExited: function(exitCode) {
+      // An Omarchy without the sender: say nothing rather than fall back to
+      // notify-send, which Omarchy itself never uses.
+      if (exitCode === 127) {
+        root.notificationsAvailable = false
+        return
+      }
+      var id = String(notifyStdout.text || "").trim()
+      if (exitCode === 0 && /^[0-9]+$/.test(id)) root._toastId = id
+      var queued = root._queuedNotification
+      root._queuedNotification = null
+      if (queued) root.notify(queued)
+    }
   }
 
   // Every privileged helper escalates itself (sudo when it has a tty, pkexec
@@ -269,6 +392,60 @@ Item {
     speedProcess.running = true
   }
 
+  function checkLeaks() {
+    if (doctorProcess.running || !installed) return
+    checkingLeaks = true
+    leakError = ""
+    doctorProcess.command = ["bash", "-c", "exec tormarchy doctor --json"]
+    doctorProcess.running = true
+  }
+
+  // A report describes the machine as it was. Anything that changes the routing
+  // makes it a claim about a state that no longer exists, so it goes.
+  function forgetLeakResult() {
+    leakResult = null
+    leakCheckedAtMs = 0
+    leakError = ""
+  }
+
+  function loadBridgeDetail() {
+    if (bridgeStatusProcess.running || !installed) return
+    bridgeStatusProcess.command = ["bash", "-c", "exec tormarchy bridge status --json"]
+    bridgeStatusProcess.running = true
+  }
+
+  function pasteBridges() {
+    if (bridgeWorking || !installed) return
+    cancelBridges()
+    clipboardProcess.command = ["wl-paste", "--no-newline", "--type", "text/plain"]
+    clipboardProcess.running = true
+  }
+
+  function applyBridges() {
+    if (bridgeWorking || busy || _pendingBridgeText === "") return
+    if (!bridgePreview || bridgePreview.invalidLines > 0) return
+    if (Model.missingTransports(bridgePreview).length > 0) return
+    _bridgeActionPending = true
+    actionStatus = qsTr("Switching to bridges…")
+    bridgeSetProcess.command = ["bash", "-c", "exec tormarchy bridge set"]
+    bridgeSetProcess.stdinEnabled = true
+    bridgeSetProcess.running = true
+  }
+
+  function cancelBridges() {
+    _pendingBridgeText = ""
+    bridgePreview = null
+    bridgeMessage = ""
+  }
+
+  function setBridgesEnabled(on) {
+    _bridgeActionPending = true
+    run(["tormarchy", "bridge", on ? "on" : "off"], -1,
+        on ? qsTr("Turning bridges on…") : qsTr("Turning bridges off…"))
+  }
+
+  onWatchingChanged: if (!watching) cancelBridges()
+
   function loadExitCountries() {
     if (exitListProcess.running || !torRunning) return
     loadingExitCountries = true
@@ -293,6 +470,8 @@ Item {
   function run(argv, desired, progress) {
     if (actionProcess.running) return
     if (desired !== -1) _desired = desired
+    _actionWasConnect = argv[1] === "connect"
+    _bridgeActionPending = argv[1] === "bridge"
     _actionOutput = ""
     _actionError = ""
     actionStatus = String(progress || "")
@@ -403,6 +582,7 @@ Item {
         settleTimer.ticks = 0
         settleTimer.running = false
         root._desired = -1
+        root._bridgeActionPending = false
       }
     }
   }
@@ -431,6 +611,7 @@ Item {
         root.torRunning = false
         root.statusText = "Tor helpers are not installed"
         root.lastError = ""
+        root.noteConnectionState()
       } else {
         root.lastError = Model.elide(stderr || stdout || "Could not read Tor status")
       }
@@ -457,6 +638,10 @@ Item {
         // Drop the optimistic state: whatever we hoped for did not happen.
         root._desired = -1
         root.lastError = Model.elide(stderr || stdout || "Tor command failed")
+        // A connect can run for minutes while it waits on tor, long after the
+        // panel has been closed and forgotten. Its failure is worth a toast.
+        if (root._actionWasConnect && exitCode !== 126 && exitCode !== 127)
+          root.notify(Model.connectFailedNotification(root.lastError, root.notificationPolicy))
         root.actionStatus = root.lastError
         actionStatusTimer.restart()
       } else {
@@ -465,6 +650,8 @@ Item {
       }
       // Everything read before this point is now stale.
       root._actionEpoch += 1
+      root.forgetLeakResult()
+      if (root._bridgeActionPending) root.loadBridgeDetail()
       settleTimer.ticks = 0
       settleTimer.restart()
       delayedRefresh.restart()
@@ -472,6 +659,7 @@ Item {
   }
 
   property bool _cancelled: false
+  property bool _actionWasConnect: false
 
   Process {
     id: cancelProcess
@@ -490,9 +678,112 @@ Item {
       }
       actionStatusTimer.restart()
       root._actionEpoch += 1
+      root.forgetLeakResult()
       settleTimer.ticks = 0
       settleTimer.restart()
       delayedRefresh.restart()
+    }
+  }
+
+  Process {
+    id: bridgeStatusProcess
+    running: false
+    command: []
+    stdout: StdioCollector { id: bridgeStatusStdout; waitForEnd: true }
+    onExited: function(exitCode) {
+      var report = Model.parseBridgeReport(String(bridgeStatusStdout.text || ""))
+      if (exitCode === 0 && report.ok) {
+        root.bridgeDetail = report
+        if (report.state !== "") root.bridgeState = report.state
+      }
+    }
+  }
+
+  Process {
+    id: clipboardProcess
+    running: false
+    command: []
+    stdout: StdioCollector { id: clipboardStdout; waitForEnd: true }
+    onExited: function(exitCode) {
+      var text = exitCode === 0 ? String(clipboardStdout.text || "") : ""
+      if (text.trim() === "") {
+        root.bridgeMessage = qsTr("The clipboard is empty. Copy your bridge lines first.")
+        return
+      }
+      root._pendingBridgeText = text
+      bridgeCheckProcess.command = ["bash", "-c", "exec tormarchy bridge check"]
+      bridgeCheckProcess.stdinEnabled = true
+      bridgeCheckProcess.running = true
+    }
+  }
+
+  Process {
+    id: bridgeCheckProcess
+    running: false
+    command: []
+    stdout: StdioCollector { id: bridgeCheckStdout; waitForEnd: true }
+    // Closing stdin is the end of input that `bridge check` reads to.
+    onStarted: {
+      bridgeCheckProcess.write(root._pendingBridgeText + "\n")
+      bridgeCheckProcess.stdinEnabled = false
+    }
+    onExited: function(exitCode) {
+      var report = Model.parseBridgeReport(String(bridgeCheckStdout.text || ""))
+      if (exitCode !== 0 || !report.ok || report.count === 0) {
+        root._pendingBridgeText = ""
+        root.bridgeMessage = qsTr("No bridge lines on the clipboard. Each starts with a transport, like obfs4.")
+        return
+      }
+      root.bridgePreview = report
+    }
+  }
+
+  Process {
+    id: bridgeSetProcess
+    running: false
+    command: []
+    stderr: StdioCollector { id: bridgeSetStderr; waitForEnd: true }
+    onStarted: {
+      bridgeSetProcess.write(root._pendingBridgeText + "\n")
+      bridgeSetProcess.stdinEnabled = false
+      root._pendingBridgeText = ""
+    }
+    onExited: function(exitCode) {
+      root.bridgePreview = null
+      if (exitCode === 126) {
+        // The password prompt was dismissed. Nothing changed, and that is not news.
+        root.bridgeMessage = ""
+      } else if (exitCode !== 0) {
+        root.bridgeMessage = Model.elide(String(bridgeSetStderr.text || "") || qsTr("Could not switch to bridges"))
+      } else {
+        root.bridgeMessage = ""
+      }
+      root.actionStatus = ""
+      root._actionEpoch += 1
+      root.forgetLeakResult()
+      root.loadBridgeDetail()
+      settleTimer.ticks = 0
+      settleTimer.restart()
+      delayedRefresh.restart()
+    }
+  }
+
+  Process {
+    id: doctorProcess
+    running: false
+    command: []
+    stdout: StdioCollector { id: doctorStdout; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.checkingLeaks = false
+      // doctor exits non-zero whenever a check fails, which is a result, not an
+      // error. Only a report that cannot be read is an error.
+      var parsed = Model.parseDoctor(String(doctorStdout.text || ""))
+      if (parsed.ok) {
+        root.leakResult = parsed
+        root.leakCheckedAtMs = Date.now()
+      } else {
+        root.leakError = parsed.error
+      }
     }
   }
 

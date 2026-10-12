@@ -34,7 +34,8 @@
     "defaults": {
       "mode": "lan",
       "refreshIntervalSec": 5,
-      "speedIntervalSec": 3
+      "speedIntervalSec": 3,
+      "notifications": "problems"
     },
     "schema": [
       {
@@ -67,6 +68,18 @@
         "max": 60,
         "step": 1,
         "defaultValue": 3
+      },
+      {
+        "key": "notifications",
+        "type": "enum",
+        "label": "Notifications",
+        "options": [
+          "problems",
+          "all",
+          "off"
+        ],
+        "defaultValue": "problems",
+        "description": "problems: the kill switch engaging, Tor coming back, and a connect that fails. all: also every successful connect and bridges taking over. off: no notifications."
       }
     ]
   }

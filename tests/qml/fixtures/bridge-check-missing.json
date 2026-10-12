@@ -1,0 +1,1 @@
+{"invalidLines":0,"count":3,"transports":[{"name":"obfs4","count":2,"available":false,"installHint":"omarchy-pkg-aur-add obfs4proxy"},{"name":"webtunnel","count":1,"available":false,"installHint":"not packaged for Arch; build webtunnel-client from the Tor anti-censorship repos"}]}

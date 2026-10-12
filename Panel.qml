@@ -21,6 +21,8 @@ Panel {
   LayoutMirroring.childrenInherit: true
   property int modeIndex: 0
   property bool cursorActive: false
+  // Which tool tile is open beneath its band: "" | "leaks" | "bridges".
+  property string expandedTool: ""
 
   // Every palette read goes through the Commons alias. Qt 6.12 ships a `Color`
   // type of its own, and a bare `Color.accent` now resolves to that instead of
@@ -101,6 +103,7 @@ Panel {
   readonly property real metricsHeight: Style.space(39)  // 48px
   readonly property real modeHeight: Style.space(42)     // 52px
   readonly property real actionHeight: Style.space(29)   // 36px
+  readonly property real toolHeight: Style.space(42)     // 52px, the mode row's height
   readonly property real hairline: Math.max(1, Style.space(1))
 
   readonly property color surfaceFill: Util.alpha(foreground, 0.05)
@@ -115,6 +118,88 @@ Panel {
     border.color: root.surfaceLine
     radius: Style.cornerRadius
   }
+  // A tool's tile in band 4: glyph, title, one line of state. Selecting it opens
+  // the tool beneath the band.
+  component ToolTile: Surface {
+    id: tile
+    property string section: ""
+    property string glyph: ""
+    property color glyphColor: root.foreground
+    property string title: ""
+    property string subtitle: ""
+    property color subtitleColor: root.dim
+    signal activated()
+
+    readonly property bool hot: tileMouse.containsMouse
+      || (root.cursorActive && root.focusSection === section)
+    readonly property bool open: root.expandedTool === section
+
+    height: root.toolHeight
+    clip: true
+    border.color: hot || open ? Util.alpha(root.foreground, 0.55) : root.surfaceLine
+
+    Text {
+      id: tileGlyph
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(12)
+      anchors.verticalCenter: parent.verticalCenter
+      text: tile.glyph
+      color: tile.glyphColor
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.title
+    }
+
+    Column {
+      anchors.left: tileGlyph.right
+      anchors.leftMargin: Style.space(10)
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(10)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(1)
+
+      Text {
+        width: parent.width
+        elide: Text.ElideRight
+        text: tile.title
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+      }
+
+      Text {
+        width: parent.width
+        elide: Text.ElideRight
+        visible: text !== ""
+        text: tile.subtitle
+        color: tile.subtitleColor
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+    }
+
+    MouseArea {
+      id: tileMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: tile.activated()
+      onContainsMouseChanged: if (containsMouse) {
+        root.cursorActive = true
+        root.focusSection = tile.section
+      }
+    }
+  }
+
+  // Ticks only while the panel is open, so "checked 2 min ago" stays true.
+  property double now: Date.now()
+  Timer {
+    interval: 30000
+    repeat: true
+    running: root.opened
+    triggeredOnStart: true
+    onTriggered: root.now = Date.now()
+  }
+
   function gridColumn(available) { return (available - gridGap * 2) / 3 }
   function gridSpan2(available) { return gridColumn(available) * 2 + gridGap }
 
@@ -164,6 +249,8 @@ Panel {
     if (showExit) order.push("exit")
     order.push("speed")
     if (tor.canNewCircuit) order.push("newnym")
+    order.push("leaks")
+    order.push("bridges")
     order.push("mode")
     return order
   }
@@ -205,6 +292,27 @@ Panel {
     else if (focusSection === "exit") exitPicker.toggle()
     else if (focusSection === "speed") tor.measureSpeed()
     else if (focusSection === "mode") tor.setMode(Model.MODE_ORDER[modeIndex])
+    else if (focusSection === "leaks") openLeakCheck()
+    else if (focusSection === "bridges") toggleTool("bridges")
+  }
+
+  function toggleTool(name) {
+    expandedTool = expandedTool === name ? "" : name
+    // A paste is only ever previewed while its section is on screen.
+    if (expandedTool !== "bridges") tor.cancelBridges()
+    else tor.loadBridgeDetail()
+  }
+
+  // Opening the leak check runs it, unless a result is already on screen: one
+  // that is there describes the current state, because every routing change
+  // clears it. Running it again is the explicit button beneath.
+  function openLeakCheck() {
+    if (expandedTool === "leaks") {
+      expandedTool = ""
+      return
+    }
+    expandedTool = "leaks"
+    if (!tor.leakResult && !tor.checkingLeaks) tor.checkLeaks()
   }
 
   // canToggle rather than !busy: a connect still waiting on tor's bootstrap can
@@ -265,7 +373,10 @@ Panel {
   // would see.
   onOpenedChanged: {
     tor.watching = opened
-    if (!opened) return
+    if (!opened) {
+      expandedTool = ""
+      return
+    }
     cursorActive = false
     if (panelFlick) panelFlick.contentY = 0
     tor.refresh()
@@ -309,6 +420,7 @@ Panel {
     }
     function toggleTor(): string { root.toggleConnected(); return "ok" }
     function status(): string { return tor.statusText }
+    function checkLeaks(): string { root.open(); root.openLeakCheck(); return "ok" }
   }
 
   BarIconButton {
@@ -366,6 +478,8 @@ Panel {
         else if (key === "e") root.openExitPicker()
         else if (key === "s") tor.measureSpeed()
         else if (key === "r") tor.refresh()
+        else if (key === "d") { root.cursorActive = true; root.focusSection = "leaks"; root.openLeakCheck() }
+        else if (key === "b") { root.cursorActive = true; root.focusSection = "bridges"; root.toggleTool("bridges") }
       }
 
       Flickable {
@@ -757,6 +871,314 @@ Panel {
                 // widest thing in the row.
                 label: qsTr("AGE")
                 value: Model.formatAge(tor.circuitAgeSec)
+              }
+            }
+
+            // Band 4 -- the tools: the leak check across two columns, bridges
+            // in the third, on the same grid and Surface as the latency card so
+            // the band lines up with everything above it. Each opens beneath
+            // the band rather than in a popup, so it scrolls with the panel.
+            Row {
+              id: toolsRow
+              width: parent.width
+              spacing: connectedBody.gap
+
+              ToolTile {
+                width: root.gridSpan2(toolsRow.width)
+                section: "leaks"
+                glyph: tor.checkingLeaks ? "󰔟"
+                  : (tor.leakResult ? Model.doctorGlyph(Model.doctorOverall(tor.leakResult)) : "󰕥")
+                glyphColor: Model.doctorOverall(tor.leakResult) === "fail" ? root.urgent : root.foreground
+                title: qsTr("Leak check")
+                subtitle: tor.checkingLeaks ? qsTr("Checking…")
+                  : (tor.leakError !== "" ? tor.leakError
+                  : (tor.leakResult ? Model.doctorSummary(tor.leakResult) + " · " + Model.formatAgo((root.now - tor.leakCheckedAtMs) / 1000)
+                  : qsTr("Prove nothing gets past Tor")))
+                subtitleColor: tor.leakError !== "" ? root.urgent : root.dim
+                onActivated: root.openLeakCheck()
+              }
+
+              ToolTile {
+                width: root.gridColumn(toolsRow.width)
+                section: "bridges"
+                glyph: "󰘘"
+                title: qsTr("Bridges")
+                subtitle: Model.bridgeStateLabel(tor.bridgeState, tor.bridgeDetail)
+                onActivated: root.toggleTool("bridges")
+              }
+            }
+
+            // The leak check's results, one line per check, grouped the way
+            // `tormarchy doctor` prints them in a terminal.
+            Column {
+              id: leakDetail
+              visible: root.expandedTool === "leaks"
+              width: parent.width
+              spacing: Style.space(4)
+
+              Repeater {
+                model: tor.leakResult ? tor.leakResult.checks : []
+
+                Column {
+                  required property var modelData
+                  required property int index
+
+                  width: leakDetail.width
+                  spacing: Style.space(2)
+
+                  readonly property bool newGroup: index === 0
+                    || tor.leakResult.checks[index - 1].group !== modelData.group
+
+                  Text {
+                    visible: parent.newGroup
+                    topPadding: parent.index === 0 ? 0 : Style.space(4)
+                    text: String(parent.modelData.group).toUpperCase()
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.letterSpacing: 0.8
+                  }
+
+                  Row {
+                    width: parent.width
+                    spacing: Style.space(8)
+
+                    Text {
+                      id: checkGlyph
+                      width: Style.space(14)
+                      text: Model.doctorGlyph(modelData.status)
+                      color: modelData.status === "fail" ? root.urgent
+                        : (modelData.status === "skip" ? root.dim : root.foreground)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                    }
+
+                    Column {
+                      width: parent.width - checkGlyph.width - parent.spacing
+
+                      Text {
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        textFormat: Text.PlainText
+                        text: modelData.text
+                        color: modelData.status === "fail" ? root.urgent
+                          : (modelData.status === "skip" ? root.dim : root.foreground)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
+
+                      Text {
+                        visible: text !== ""
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                        textFormat: Text.PlainText
+                        text: modelData.detail
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+                    }
+                  }
+                }
+              }
+
+              Text {
+                visible: tor.checkingLeaks
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: qsTr("Asking check.torproject.org and trying IPv6 directly. Up to half a minute.")
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              Button {
+                visible: !tor.checkingLeaks
+                text: tor.leakResult ? qsTr("Check again") : qsTr("Check now")
+                bordered: true
+                focusable: false
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: tor.checkLeaks()
+              }
+            }
+
+            // Bridges: what is set up, whether this machine can run it, and a
+            // way to change it that never puts a bridge line on a command line.
+            // A paste is read straight off the clipboard, shown as counts for a
+            // yes or no, and handed to tormarchy over stdin.
+            Column {
+              id: bridgeSection
+              visible: root.expandedTool === "bridges"
+              width: parent.width
+              spacing: Style.space(6)
+
+              readonly property var current: tor.bridgeDetail
+              readonly property var preview: tor.bridgePreview
+              readonly property var missing: Model.missingTransports(preview)
+              readonly property bool canApply: !!preview && missing.length === 0
+                && preview.invalidLines === 0 && !tor.busy && !tor.bridgeWorking
+
+              Text {
+                visible: !bridgeSection.preview
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: tor.bridgeState === "active" ? qsTr("Tor reaches the network through these bridges.")
+                  : (tor.bridgeState === "stashed" ? qsTr("Saved bridges are switched off. Tor connects directly.")
+                  : qsTr("No bridges. Tor connects to the network directly, which is fine unless it is blocked where you are."))
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              // The saved set, one transport per line. A transport this machine
+              // cannot run is the usual reason bridges "do nothing", so it says
+              // what to install right where it is listed.
+              Repeater {
+                model: !bridgeSection.preview && bridgeSection.current && bridgeSection.current.ok
+                  ? bridgeSection.current.transports : []
+
+                Row {
+                  required property var modelData
+                  width: bridgeSection.width
+                  spacing: Style.space(8)
+
+                  Text {
+                    id: transportGlyph
+                    width: Style.space(14)
+                    text: Model.doctorGlyph(modelData.available ? "pass" : "fail")
+                    color: modelData.available ? root.foreground : root.urgent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                  }
+
+                  Text {
+                    width: parent.width - transportGlyph.width - parent.spacing
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                    text: modelData.available
+                      ? qsTr("%1 %2").arg(modelData.count).arg(modelData.name)
+                      : qsTr("%1 %2 · not installed: %3").arg(modelData.count).arg(modelData.name).arg(modelData.installHint)
+                    color: modelData.available ? root.foreground : root.urgent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+              }
+
+              // What the paste holds, before anything is changed.
+              Column {
+                visible: !!bridgeSection.preview
+                width: parent.width
+                spacing: Style.space(4)
+
+                Text {
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  text: qsTr("From the clipboard: %1").arg(Model.bridgeCountText(bridgeSection.preview))
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+
+                Repeater {
+                  model: bridgeSection.missing
+
+                  Text {
+                    required property var modelData
+                    width: bridgeSection.width
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                    text: qsTr("%1 · not installed: %2").arg(modelData.name).arg(modelData.installHint)
+                    color: root.urgent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+
+                Text {
+                  visible: !!bridgeSection.preview && bridgeSection.preview.invalidLines > 0
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  text: bridgeSection.preview && bridgeSection.preview.invalidLines === 1
+                    ? qsTr("1 line is not a bridge line. Copy only the lines that start with a transport, then paste again.")
+                    : qsTr("%1 lines are not bridge lines. Copy only the lines that start with a transport, then paste again.")
+                        .arg(bridgeSection.preview ? bridgeSection.preview.invalidLines : 0)
+                  color: root.urgent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                Row {
+                  spacing: Style.space(8)
+
+                  Button {
+                    text: qsTr("Use these")
+                    bordered: true
+                    focusable: false
+                    enabled: bridgeSection.canApply
+                    opacity: enabled ? 1 : 0.4
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    onClicked: tor.applyBridges()
+                  }
+
+                  Button {
+                    text: qsTr("Cancel")
+                    focusable: false
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    onClicked: tor.cancelBridges()
+                  }
+                }
+              }
+
+              Text {
+                visible: tor.bridgeMessage !== ""
+                width: parent.width
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+                text: tor.bridgeMessage
+                color: root.urgent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Row {
+                visible: !bridgeSection.preview
+                spacing: Style.space(8)
+
+                Button {
+                  text: tor.bridgeWorking ? qsTr("Reading…") : qsTr("Paste bridges")
+                  bordered: true
+                  focusable: false
+                  enabled: !tor.bridgeWorking && !tor.busy
+                  opacity: enabled ? 1 : 0.4
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: tor.pasteBridges()
+                }
+
+                Button {
+                  visible: tor.bridgeState !== "off"
+                  text: tor.bridgeState === "active" ? qsTr("Turn off") : qsTr("Turn on")
+                  focusable: false
+                  enabled: !tor.busy && !tor.bridgeWorking
+                  opacity: enabled ? 1 : 0.4
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: tor.setBridgesEnabled(tor.bridgeState !== "active")
+                }
+              }
+
+              Text {
+                visible: !bridgeSection.preview
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: qsTr("Get bridges from bridges.torproject.org or @GetBridgesBot on Telegram, copy them, then paste.")
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
               }
             }
           }

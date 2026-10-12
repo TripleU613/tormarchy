@@ -193,7 +193,7 @@ want "stale status reads are dropped" Service.qml "root._statusEpoch !== root._a
 
 # The toggle's busy state is action-only. Folding the routine status poll in made
 # the switch flash and refuse clicks on every refresh.
-want "busy tracks actions, not the status poll" Service.qml "readonly property bool busy: actionProcess.running"
+want "busy tracks actions, not the status poll" Service.qml "readonly property bool busy: (!!actionProcess && actionProcess.running)"
 
 # A connect waits up to two minutes for bootstrap, and the switch used to refuse
 # every click for all of it. Switching off during that wait cancels instead.

@@ -77,6 +77,12 @@ TORRC_EXIT="$TORRC_DIR/10-tormarchy-exit.conf"
 TORRC_BRIDGES="$TORRC_DIR/20-tormarchy-bridges.conf"
 
 BRIDGE_STASH="/etc/tormarchy/bridges.stash"
+# What the stash holds, without the lines themselves: transport names and
+# counts, readable by the panel. The stash and the live bridge config are 0600
+# root, and which bridges you use is what a bridge exists to hide.
+BRIDGE_SUMMARY="/etc/tormarchy/bridges.summary"
+# More than any real set of bridge lines; past it, input is not bridge lines.
+BRIDGE_INPUT_BYTE_LIMIT=65536
 
 # Survives a reboot, unlike everything in /run. Only written when the boot
 # receiver is enabled, so a machine that never opted in has nothing to resume.
@@ -849,6 +855,7 @@ cmd_status() {
   "connected": $connected,
   "bootstrap": ${bootstrap:-0},
   "controlPort": $control_port,
+  "bridges": "$(bridge_state)",
   "mode": "$(json_escape "$mode")",
   "exitIp": "$(json_escape "$exit_ip")",
   "exitCountry": "$(json_escape "$exit_cc")",
@@ -1194,8 +1201,79 @@ install_hint() {
   esac
 }
 
+# A plain bridge -- "198.51.100.7:443 FINGERPRINT" -- names an address first and
+# needs no transport plugin. It used to be read as a transport called
+# "198.51.100.7:443", which nothing provides, so it could never be used.
+BRIDGE_ADDRESS_RE='^(\[[0-9a-fA-F:]+\]|[0-9.]+):[0-9]+$'
+
 transports_in() {
-  awk '!/^[[:space:]]*(#|$)/ { print $1 }' "$1" 2>/dev/null | sort -u
+  awk -v addr="$BRIDGE_ADDRESS_RE" \
+    '!/^[[:space:]]*(#|$)/ && $1 !~ addr { print $1 }' "$1" 2>/dev/null | sort -u
+}
+
+# Bridge lines as people paste them: from the BridgeDB page, a Telegram message,
+# a torrc. Carriage returns go, and so does a leading "Bridge ", torrc's own
+# prefix, which bridge_activate puts back -- so a pasted line and a typed one
+# stage the same.
+normalize_bridge_lines() {
+  head -c "$BRIDGE_INPUT_BYTE_LIMIT" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/^Bridge[[:space:]]+//'
+}
+
+# "<transport> <count>" per line, "plain <count>" for bridges without one.
+# Only lines that are bridge lines count; bridge_invalid_count reports the rest.
+bridge_counts() {
+  awk -v addr="$BRIDGE_ADDRESS_RE" '
+    /^[[:space:]]*(#|$)/ { next }
+    $1 ~ addr { n["plain"]++; next }
+    $1 ~ /^[a-z0-9_]+$/ && $2 ~ addr { n[$1]++ }
+    END { for (t in n) print t, n[t] }
+  ' "$1" 2>/dev/null | sort
+}
+
+# Lines that are neither "<transport> <address:port> ..." nor a plain bridge.
+bridge_invalid_count() {
+  awk -v addr="$BRIDGE_ADDRESS_RE" '
+    /^[[:space:]]*(#|$)/ { next }
+    $1 ~ addr { next }
+    $1 ~ /^[a-z0-9_]+$/ && $2 ~ addr { next }
+    { bad++ }
+    END { print bad + 0 }
+  ' "$1" 2>/dev/null
+}
+
+# {"count":N,"transports":[...]} from "<name> <count>" lines on stdin, with
+# whether this machine can run each transport and how to get it if not.
+bridge_counts_json() {
+  local name count total=0 items="" available hint
+  while read -r name count; do
+    [[ -n $name && $count =~ ^[0-9]+$ ]] || continue
+    total=$(( total + count ))
+    if [[ $name == plain ]] || transport_binary "$name" >/dev/null 2>&1; then
+      available=true hint=""
+    else
+      available=false hint=$(install_hint "$name")
+    fi
+    items+="${items:+,}{\"name\":\"$(json_escape "$name")\",\"count\":$count,\"available\":$available,\"installHint\":\"$(json_escape "$hint")\"}"
+  done
+  printf '"count":%d,"transports":[%s]' "$total" "$items"
+}
+
+bridge_state() {
+  if [[ -f $TORRC_BRIDGES ]]; then printf 'active'
+  elif [[ -f $BRIDGE_SUMMARY || -f $BRIDGE_STASH ]]; then printf 'stashed'
+  else printf 'off'
+  fi
+}
+
+# Root. Refreshes the readable summary from the stash.
+write_bridge_summary() {
+  (( EUID == 0 )) || return 0
+  [[ -f $BRIDGE_STASH ]] || { rm -f "$BRIDGE_SUMMARY"; return 0; }
+  local staging
+  staging=$(mktemp "$BRIDGE_SUMMARY.XXXXXX") || return 1
+  bridge_counts "$BRIDGE_STASH" >"$staging"
+  chmod 0644 "$staging"
+  mv -f -- "$staging" "$BRIDGE_SUMMARY"
 }
 
 # Turn bridge lines into a torrc snippet, refusing any transport this machine
@@ -1247,6 +1325,16 @@ bridge_reload() {
 cmd_bridge() {
   case "${1:-status}" in
   status)
+    if [[ ${2:-} == --json ]]; then
+      local counts=""
+      if [[ -r $BRIDGE_SUMMARY ]]; then
+        counts=$(head -c 4096 -- "$BRIDGE_SUMMARY")
+      elif [[ -r $BRIDGE_STASH ]]; then
+        counts=$(bridge_counts "$BRIDGE_STASH")
+      fi
+      printf '{"state":"%s",%s}\n' "$(bridge_state)" "$(bridge_counts_json <<<"$counts")"
+      return 0
+    fi
     if [[ -f $TORRC_BRIDGES ]]; then
       echo "Bridges: ACTIVE"
       local t
@@ -1259,6 +1347,18 @@ cmd_bridge() {
     else
       echo "Bridges: off (none configured)"
     fi
+    ;;
+  check)
+    # Unprivileged and side-effect free: reads lines on stdin and says what is
+    # in them -- how many, which transports, whether this machine can run them
+    # -- so the panel can show what a paste holds before anything is applied.
+    # It writes nothing anywhere; the lines live in a variable and are gone when
+    # this exits.
+    local input
+    input=$(normalize_bridge_lines)
+    printf '{"invalidLines":%d,%s}\n' \
+      "$(bridge_invalid_count /dev/stdin <<<"$input")" \
+      "$(bridge_counts /dev/stdin <<<"$input" | bridge_counts_json)"
     ;;
   transports)
     local transport binary
@@ -1278,18 +1378,26 @@ cmd_bridge() {
     # stdin through, so escalating first and reading after removes the whole
     # class of problem.
     require_root
-    local tmp
-    tmp=$(mktemp "$TORRC_DIR/.bridges.XXXXXX") || die "could not create a staging file"
-    trap 'rm -f "$tmp"' EXIT
-    chmod 0600 "$tmp"
-    cat >"$tmp"
-    [[ -s $tmp ]] || die "no input on stdin; pipe bridge lines in, e.g. tormarchy bridge set < bridges.txt"
-    grep -qE '^[[:space:]]*[a-z0-9_]+[[:space:]]+[0-9a-fA-F.:\[]' "$tmp" \
-      || die "no bridge lines found; each line starts with a transport name, e.g. obfs4"
+    # Global, not local: the EXIT trap runs after this function has returned,
+    # when a local is already gone. As a local the trap removed nothing, and
+    # every successful set left a copy of the bridge lines behind in torrc.d.
+    BRIDGE_STAGING=$(mktemp "$TORRC_DIR/.bridges.XXXXXX") || die "could not create a staging file"
+    trap 'rm -f -- "$BRIDGE_STAGING"' EXIT
+    chmod 0600 "$BRIDGE_STAGING"
+    normalize_bridge_lines >"$BRIDGE_STAGING"
+    [[ -s $BRIDGE_STAGING ]] || die "no input on stdin; pipe bridge lines in, e.g. tormarchy bridge set < bridges.txt"
+    local counts invalid
+    counts=$(bridge_counts "$BRIDGE_STAGING")
+    [[ -n $counts ]] || die "no bridge lines found; each line starts with a transport name, e.g. obfs4"
+    invalid=$(bridge_invalid_count "$BRIDGE_STAGING")
+    (( invalid == 0 )) || die "$invalid line(s) are not bridge lines; nothing was changed"
 
-    install -d -m 0700 "$(dirname "$BRIDGE_STASH")"
-    install -m 0600 "$tmp" "$BRIDGE_STASH"
-    bridge_activate "$tmp" || die "refusing to write a config tor cannot load"
+    # 0711: the panel can reach the summary by name without being able to list
+    # the directory, and the stash inside stays 0600.
+    install -d -m 0711 "$(dirname "$BRIDGE_STASH")"
+    bridge_activate "$BRIDGE_STAGING" || die "refusing to write a config tor cannot load"
+    install -m 0600 "$BRIDGE_STAGING" "$BRIDGE_STASH"
+    write_bridge_summary || true
     bridge_reload
     echo "Bridges active."
     ;;
@@ -1297,21 +1405,27 @@ cmd_bridge() {
     require_root
     [[ -f $BRIDGE_STASH ]] || die "no stashed bridge lines; use 'tormarchy bridge set' first"
     bridge_activate "$BRIDGE_STASH" || die "refusing to write a config tor cannot load"
+    install -d -m 0711 "$(dirname "$BRIDGE_STASH")"
+    write_bridge_summary || true
     bridge_reload
     echo "Bridges reactivated."
     ;;
   off)
     require_root
     rm -f "$TORRC_BRIDGES"
+    install -d -m 0711 "$(dirname "$BRIDGE_STASH")" 2>/dev/null || true
+    write_bridge_summary || true
     bridge_reload
     echo "Bridges off. Connecting directly."
     ;;
   *)
     cat <<USAGE
-Usage: tormarchy bridge <status|set|on|off|transports>
+Usage: tormarchy bridge <status [--json]|set|check|on|off|transports>
 
-  set   Read bridge lines from stdin and activate them:
-          tormarchy bridge set < bridges.txt
+  set     Read bridge lines from stdin and activate them:
+            tormarchy bridge set < bridges.txt
+  check   Read bridge lines from stdin and report what they need, changing
+          nothing. Needs no root.
 
 Get current bridge lines from https://bridges.torproject.org/options, the
 Telegram bot @GetBridgesBot, or bridges@torproject.org. There is deliberately
@@ -1670,22 +1784,47 @@ RULES
 # ---- diagnostics ----
 
 cmd_doctor() {
-  local failures=0
-  pass() { printf '  \033[32m✓\033[0m %s\n' "$1"; }
-  fail() { printf '  \033[31m✗\033[0m %s\n' "$1"; failures=$(( failures + 1 )); }
-  warn() { printf '  \033[33m!\033[0m %s\n' "$1"; }
-  skip() { printf '  \033[90m-\033[0m %s\n' "$1"; }
+  local json=false
+  [[ ${1:-} == --json ]] && json=true
+
+  # Every check is recorded once, then either printed as it is found -- the
+  # terminal view, unchanged -- or kept for --json, which is what the panel's
+  # leak check reads. One list of checks, so the two can never disagree.
+  local failures=0 group=""
+  local -a check_groups=() check_states=() check_texts=() check_details=()
+  record() {
+    local state=$1 text=$2 detail=${3:-}
+    check_groups+=("$group") check_states+=("$state") check_texts+=("$text") check_details+=("$detail")
+    [[ $state == fail ]] && failures=$(( failures + 1 ))
+    $json && return 0
+    case $state in
+      pass) printf '  \033[32m✓\033[0m %s\n' "$text" ;;
+      fail) printf '  \033[31m✗\033[0m %s\n' "$text" ;;
+      warn) printf '  \033[33m!\033[0m %s\n' "$text" ;;
+      skip) printf '  \033[90m-\033[0m %s\n' "$text" ;;
+    esac
+    [[ -n $detail ]] && printf '    %s\n' "$detail"
+    return 0
+  }
+  pass() { record pass "$@"; }
+  fail() { record fail "$@"; }
+  warn() { record warn "$@"; }
+  skip() { record skip "$@"; }
+  section() { group=$1; $json || echo "$1"; }
+  gap() { $json || echo; }
 
   local mode connected=false
   mode=$(current_mode)
   rules_present && connected=true
 
-  echo "Tormarchy doctor"
-  echo
-  printf 'State\n  mode: %s\n  rules applied: %s\n  tor running: %s\n\n' \
-    "${mode:-none}" "$connected" "$(tor_is_running && echo true || echo false)"
+  if ! $json; then
+    echo "Tormarchy doctor"
+    echo
+    printf 'State\n  mode: %s\n  rules applied: %s\n  tor running: %s\n\n' \
+      "${mode:-none}" "$connected" "$(tor_is_running && echo true || echo false)"
+  fi
 
-  echo "Tor daemon"
+  section "Tor daemon"
   if ! command -v tor >/dev/null 2>&1; then
     fail "tor is not installed"
   elif ! tor_is_running; then
@@ -1708,20 +1847,36 @@ cmd_doctor() {
       fail "cannot read the control cookie: $(cookie_hint)"
     fi
   fi
-  echo
+  gap
 
-  echo "Routing"
+  section "Routing"
+  local body seen_ip
   if [[ $mode == socks ]]; then
-    skip "browser-only mode: nothing is routed system-wide by design"
+    # Nothing is routed system-wide here, so the one thing worth proving is the
+    # thing browser-only does offer: that the proxy really leaves through Tor.
+    if ! tor_is_running; then
+      skip "browser-only mode with tor stopped: there is no proxy to check"
+    elif body=$(curl -sf -m 25 --socks5-hostname "127.0.0.1:$SOCKS_PORT" \
+        https://check.torproject.org/api/ip 2>/dev/null); then
+      if grep -q '"IsTor":true' <<<"$body"; then
+        seen_ip=$(sed -n 's/.*"IP":"\([^"]*\)".*/\1/p' <<<"$body")
+        pass "the SOCKS proxy on 127.0.0.1:$SOCKS_PORT leaves through Tor" \
+          "${seen_ip:+exit as seen from outside: $seen_ip}"
+      else
+        fail "check.torproject.org says the SOCKS proxy is NOT Tor"
+      fi
+    else
+      fail "could not reach check.torproject.org through the SOCKS proxy"
+    fi
+    skip "browser-only mode: nothing else is routed system-wide, by design"
   elif ! $connected; then
     skip "not connected, so there is nothing to leak"
   else
-    local body seen_ip
     if body=$(curl -sf -m 25 https://check.torproject.org/api/ip 2>/dev/null); then
       if grep -q '"IsTor":true' <<<"$body"; then
-        pass "check.torproject.org confirms this connection is Tor"
         seen_ip=$(sed -n 's/.*"IP":"\([^"]*\)".*/\1/p' <<<"$body")
-        [[ -n $seen_ip ]] && printf '    exit as seen from outside: %s\n' "$seen_ip"
+        pass "check.torproject.org confirms this connection is Tor" \
+          "${seen_ip:+exit as seen from outside: $seen_ip}"
       else
         fail "check.torproject.org says this is NOT Tor -- traffic is escaping the redirect"
       fi
@@ -1764,9 +1919,9 @@ cmd_doctor() {
       pass "IP forwarding is off, so nothing routes through this machine"
     fi
   fi
-  echo
+  gap
 
-  echo "Clock"
+  section "Clock"
   # Tor will not build circuits against a badly skewed clock, and the ruleset
   # drops NTP while connected -- so a long session can drift itself broken.
   if timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -q yes; then
@@ -1776,7 +1931,19 @@ cmd_doctor() {
   else
     warn "clock is not NTP-synchronised; Tor needs an accurate clock"
   fi
-  echo
+  gap
+
+  if $json; then
+    local i items=""
+    for i in "${!check_states[@]}"; do
+      items+="${items:+,}{\"group\":\"$(json_escape "${check_groups[i]}")\",\"status\":\"${check_states[i]}\",\"text\":\"$(json_escape "${check_texts[i]}")\",\"detail\":\"$(json_escape "${check_details[i]}")\"}"
+    done
+    printf '{"ok":%s,"failures":%d,"checkedAt":"%s","mode":"%s","checks":[%s]}\n' \
+      "$( (( failures == 0 )) && echo true || echo false)" "$failures" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(json_escape "$mode")" "$items"
+    (( failures == 0 ))
+    return
+  fi
 
   (( failures == 0 )) && echo "No problems found." || { echo "$failures problem(s) found."; return 1; }
 }
@@ -2114,13 +2281,14 @@ tormarchy -- route traffic through Tor, from the Omarchy bar.
                                            control port. Makes no request.
   newnym                                   New circuit.
   exit <cc>|auto|--list                    Pin or clear the exit country.
-  bridge <status|set|on|off|transports>    Use bridges where Tor is blocked.
+  bridge <status|set|check|on|off|transports>
+                                           Use bridges where Tor is blocked.
   browser [name]|--list                    Launch a browser, in an instance of
                                            its own, that the firewall lets
                                            reach nothing but Tor.
   speed [--json]                           One latency measurement.
   pingd [seconds]                          Stream live latency, one per line.
-  doctor                                   Leak checks.
+  doctor [--json]                          Leak checks.
   boot <status|enable|disable>             Reconnect at boot if Tor was on.
   panic                                    Remove every rule. The escape hatch.
   setup / uninstall [--purge]              Install or remove the system side.

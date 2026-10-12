@@ -37,18 +37,31 @@ ap.add_argument("--panel", help="open the panel and save it to this PNG")
 ap.add_argument("--foreground", default="#cdd6f4")
 ap.add_argument("--background", default="#1e1e2e")
 ap.add_argument("--settle", type=int, default=1500, help="milliseconds to run before reporting")
+ap.add_argument("--doctor", help="JSON to answer `tormarchy doctor --json` with")
+ap.add_argument("--bridges", help="JSON to answer `tormarchy bridge status --json` with")
+ap.add_argument("--bridge-check", help="JSON to answer `tormarchy bridge check` with")
+ap.add_argument("--clipboard", help="file whose contents `wl-paste` returns")
+ap.add_argument("--expand", choices=["leaks", "bridges"], help="open this tool beneath the tools band")
+ap.add_argument("--call", action="append", default=[],
+                help="after opening, call this function on the panel root, e.g. --call openLeakCheck; "
+                     "tor.<name> calls it on the service")
+ap.add_argument("--font", action="append", default=[], help="extra font file to load, e.g. a Nerd Font, so glyphs render")
+ap.add_argument("--log", action="store_true", help="print every command run and every stdin payload")
 args = ap.parse_args()
 
 shell_dir = os.path.join(os.path.abspath(os.path.expanduser(args.omarchy)), "shell")
 if not os.path.isdir(os.path.join(shell_dir, "Ui")):
     sys.exit(f"no Omarchy shell at {shell_dir} -- pass --omarchy <checkout>")
-if args.status:
-    os.environ["TORMARCHY_STUB_STATUS"] = os.path.abspath(args.status)
+for value, name in ((args.status, "TORMARCHY_STUB_STATUS"), (args.doctor, "TORMARCHY_STUB_DOCTOR"),
+                    (args.bridges, "TORMARCHY_STUB_BRIDGES"), (args.bridge_check, "TORMARCHY_STUB_BRIDGE_CHECK"),
+                    (args.clipboard, "TORMARCHY_STUB_CLIPBOARD")):
+    if value:
+        os.environ[name] = os.path.abspath(value)
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, QTimer, QUrl, QtMsgType, qInstallMessageHandler  # noqa: E402
-from PySide6.QtGui import QGuiApplication  # noqa: E402
+from PySide6.QtCore import QMetaObject, QObject, QTimer, QUrl, QtMsgType, qInstallMessageHandler  # noqa: E402
+from PySide6.QtGui import QFontDatabase, QGuiApplication  # noqa: E402
 from PySide6.QtQml import QQmlComponent, QQmlEngine  # noqa: E402
 # Imported for its wrappers: without it the window and items come back as bare
 # QWindow and QObject, with no grabWindow() or setParentItem().
@@ -66,6 +79,9 @@ messages = []
 qInstallMessageHandler(lambda mode, ctx, msg: messages.append((mode, msg)))
 
 app = QGuiApplication(sys.argv[:1])
+for font in args.font:
+    if QFontDatabase.addApplicationFont(os.path.abspath(font)) < 0:
+        print("note  could not load font", font)
 engine = QQmlEngine()
 engine.addImportPath(imports)
 
@@ -181,6 +197,17 @@ def mount_panel():
     card = win.findChild(QObject, "card")
     card.setProperty("width", keyboard_panel.property("contentWidth") + 28)
     catcher.setParentItem(win.findChild(QObject, "cardContent"))
+    if args.expand:
+        widget.setProperty("expandedTool", args.expand)
+    QTimer.singleShot(50, lambda: call_functions(widget))
+
+
+def call_functions(widget):
+    service = find(widget, "Service")
+    for name in args.call:
+        target, method = (service, name[4:]) if name.startswith("tor.") else (widget, name)
+        if target is None or not QMetaObject.invokeMethod(target, method):
+            print("note  could not call", name)
 
 
 def fit_panel():
@@ -226,6 +253,11 @@ def report():
         if level == "FAIL":
             failed = True
         reported += 1
+    if args.log:
+        for argv in quickshell_stubs.COMMAND_LOG:
+            print("ran  ", argv)
+        for cmd, data in quickshell_stubs.STDIN_LOG:
+            print("stdin", repr(cmd), "<-", repr(data[:80]))
     print("result: " + ("FAIL" if failed else "ok") + f" ({reported} message(s) from the plugin)")
     shutil.rmtree(imports, ignore_errors=True)
     app.exit(1 if failed else 0)
