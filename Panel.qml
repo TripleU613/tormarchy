@@ -420,7 +420,22 @@ Panel {
     }
     function toggleTor(): string { root.toggleConnected(); return "ok" }
     function status(): string { return tor.statusText }
-    function checkLeaks(): string { root.open(); root.openLeakCheck(); return "ok" }
+    // Asked for by name, so it always shows the check and runs it -- never the
+    // `d` key's toggle, which would fold an open check away instead.
+    function checkLeaks(): string {
+      root.open()
+      root.focusSection = "leaks"
+      root.expandedTool = "leaks"
+      tor.cancelBridges()
+      tor.checkLeaks()
+      return "ok"
+    }
+    function bridges(): string {
+      root.open()
+      root.focusSection = "bridges"
+      if (root.expandedTool !== "bridges") root.toggleTool("bridges")
+      return "ok"
+    }
   }
 
   BarIconButton {
@@ -632,9 +647,9 @@ Panel {
                   placeholderText: qsTr("Search…")
                   emptyText: tor.loadingExitCountries ? qsTr("Loading…")
                     : (tor.torRunning ? qsTr("None found") : qsTr("Not connected"))
-                  options: Model.exitOptions(tor.exitCountries)
+                  options: Model.exitOptions(tor.exitCountries, root.recentExits, tor.excludedExits)
                   value: tor.requestedExit === "" ? "auto" : tor.requestedExit
-                  triggerLabel: Model.exitLabel(tor.requestedExit)
+                  triggerLabel: Model.exitLabel(tor.requestedExit, tor.excludedExits)
                   hasCursor: root.cursorActive && root.focusSection === "exit"
                   onChanged: function(value) { root.chooseExit(value) }
                   onHovered: function(isHovered) {
@@ -849,6 +864,22 @@ Panel {
                         opacity: index === tor.path.length - 1 ? 1.0 : 0.6
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.bodySmall
+
+                        MouseArea {
+                          id: hopMouse
+                          anchors.fill: parent
+                          anchors.margins: -Style.space(2)
+                          hoverEnabled: true
+                          acceptedButtons: Qt.NoButton
+                        }
+
+                        // Which relay this is, from the consensus: role, where
+                        // it is, its name, how fast, what it is trusted with.
+                        PanelToolTip {
+                          visible: hopMouse.containsMouse
+                          text: Model.hopTooltip(tor.hops[index] || null, index, tor.path.length, tor.path[index])
+                          fontFamily: root.fontFamily
+                        }
                       }
                     }
                   }

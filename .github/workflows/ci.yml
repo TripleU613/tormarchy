@@ -7,6 +7,11 @@ on:
   # So a contributor can re-run a check after an unrelated fix, without having
   # to push an empty commit.
   workflow_dispatch:
+  # Weekly, against whatever Omarchy and Qt are current. The widget once broke
+  # with no change on this side at all -- a Qt release changed how a bare name
+  # resolved -- and nothing ran to notice until a user did.
+  schedule:
+    - cron: "17 6 * * 1"
 
 permissions:
   contents: read
@@ -37,3 +42,32 @@ jobs:
       # ruleset is what can take someone's network down.
       - name: Run checks
         run: sudo -E .github/scripts/check.sh
+
+  shell:
+    name: Loads in the shell
+    runs-on: ${{ !contains(fromJSON('["pull_request","pull_request_review","pull_request_target","issue_comment","workflow_run"]'), github.event_name) && 'debiantripleu-ci' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # PySide6's wheels bring Qt itself, but not the system GL, keyboard and
+      # font libraries it links against. Not pinned below the current release:
+      # Arch ships each Qt release within days, and that is what the widget
+      # meets on a real machine.
+      - name: Install Qt
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-venv libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+          python3 -m venv "$RUNNER_TEMP/qt"
+          "$RUNNER_TEMP/qt/bin/pip" install -q "PySide6>=6.12"
+
+      # The shell the widget is loaded into: Omarchy's own qs.Commons and qs.Ui,
+      # at their current state rather than a copy that would go stale here.
+      - name: Fetch Omarchy
+        run: git clone -q --depth 1 https://github.com/basecamp/omarchy.git "$RUNNER_TEMP/omarchy"
+
+      - name: Load the widget in every state
+        env:
+          OMARCHY_PATH: ${{ runner.temp }}/omarchy
+          PYTHON: ${{ runner.temp }}/qt/bin/python
+          QT_QPA_PLATFORM: offscreen
+        run: .github/scripts/shell.sh

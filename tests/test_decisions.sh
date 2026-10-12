@@ -263,6 +263,61 @@ want "loopback IPv6 stays up while connected" tormarchy "printf '0' >\"\$IPV6_CO
 want "the IPv6 state is saved once per connection" tormarchy 'if [[ ! -e $IPV6_STATE_FILE ]]; then'
 
 echo
+echo "Panel tools"
+
+# Omarchy's rule is its own sender, never raw notify-send: the sender is what
+# applies the user's notification settings, do-not-disturb included.
+want "toasts go through omarchy-notification-send" Model.js '["omarchy-notification-send",'
+for f in Panel.qml Service.qml Model.js; do
+  reject "no raw notify-send in $f" "$f" '"notify-send"'
+done
+
+# The leak check makes real requests -- check.torproject.org, a direct IPv6
+# probe -- so it runs when asked and never on a schedule, like the latency
+# gauge's rule. A Timer that so much as mentions it is the start of a beacon.
+if python3 - <<'PY'
+import re, sys
+for name in ("Panel.qml", "Service.qml"):
+    src = open(name).read()
+    for m in re.finditer(r"\bTimer\s*\{", src):
+        depth, i = 0, m.end() - 1
+        while True:
+            depth += {"{": 1, "}": -1}.get(src[i], 0)
+            if depth == 0:
+                break
+            i += 1
+        if re.search(r"checkLeaks|doctorProcess|doctor", src[m.start():i]):
+            sys.exit(1)
+PY
+then ok "no Timer runs the leak check"; else bad "a Timer runs the leak check"; fi
+
+# Bridge lines are what a bridge exists to hide. argv is world-readable in
+# /proc, so they go to tormarchy over stdin and nowhere else: never a command
+# line, never a file the root helper is pointed at.
+want "bridge check takes no arguments" Service.qml '["bash", "-c", "exec tormarchy bridge check"]'
+want "bridge set takes no arguments" Service.qml '["bash", "-c", "exec tormarchy bridge set"]'
+want_next "bridge set's stdin is closed after the lines, which is its end of input" Service.qml \
+  'bridgeSetProcess.write(root._pendingBridgeText' 'bridgeSetProcess.stdinEnabled = false'
+want_next "so is bridge check's" Service.qml \
+  'bridgeCheckProcess.write(root._pendingBridgeText' 'bridgeCheckProcess.stdinEnabled = false'
+if python3 - <<'PY'
+import re, sys
+src = open("Service.qml").read()
+uses = [l.strip() for l in src.splitlines() if "_pendingBridgeText" in l]
+allowed = re.compile(r"^(property string _pendingBridgeText: \"\"|_pendingBridgeText = \"\"|root\._pendingBridgeText = (\"\"|text)"
+                     r"|if \(bridgeWorking \|\| busy \|\| _pendingBridgeText === \"\"\) return"
+                     r"|bridge(Set|Check)Process\.write\(root\._pendingBridgeText \+ \"\\n\"\))$")
+bad = [u for u in uses if not allowed.match(u)]
+if bad:
+    print("\n".join("    " + b for b in bad))
+    sys.exit(1)
+PY
+then ok "the pasted text is only stored, cleared, and written to stdin"
+else bad "the pasted text is used somewhere other than stdin (see above)"; fi
+reject "the root helper takes no bridge file argument" tormarchy 'bridge set <file'
+want "the panel-readable summary is counts only" tormarchy 'bridge_counts "$BRIDGE_STASH" >"$staging"'
+
+echo
 if (( failures == 0 )); then
   echo "  all decisions still hold"
 else

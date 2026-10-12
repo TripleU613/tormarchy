@@ -33,7 +33,7 @@ if not os.path.isdir(os.path.join(shell_dir, "Ui")):
     sys.exit(f"no Omarchy shell at {shell_dir} -- pass --omarchy <checkout>")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEventLoop, QMetaObject, QTimer, QUrl  # noqa: E402
+from PySide6.QtCore import QEventLoop, QMetaObject, QObject, QTimer, QUrl, SIGNAL  # noqa: E402
 from PySide6.QtGui import QGuiApplication  # noqa: E402
 from PySide6.QtQml import QQmlComponent, QQmlEngine  # noqa: E402
 from PySide6 import QtQuick  # noqa: E402,F401
@@ -187,6 +187,21 @@ wait(150)
 check(toasts() == [], "dismissing the password prompt is not a failure worth a toast")
 svc.deleteLater()
 del os.environ["TORMARCHY_STUB_CONNECT_EXIT"]
+
+print()
+print("Polling")
+
+svc = service(fixture("on"))
+changes = {"path": 0, "hops": 0, "excludedExits": 0}
+for name in changes:
+    QObject.connect(svc, SIGNAL(name + "Changed()"), lambda n=name: changes.__setitem__(n, changes[n] + 1))
+poll(svc, fixture("on"))
+poll(svc, fixture("on"))
+check(changes == {"path": 0, "hops": 0, "excludedExits": 0},
+      "an unchanged circuit is not reassigned, so a hop's tooltip survives the poll")
+poll(svc, fixture("on", path=["se", "ch", "nl"], excludedExits=["us"]))
+check(changes["path"] == 1 and changes["excludedExits"] == 1, "a changed one is")
+svc.deleteLater()
 
 print()
 print("Bridges")

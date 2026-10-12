@@ -19,8 +19,11 @@ Item {
   property string exitCountry: ""
   property string exitCountryName: ""
   property string requestedExit: ""
+  property var excludedExits: []
   property int circuitAgeSec: 0
   property var path: []
+  // Per hop, when the helper reports it: nickname, flags, bandwidth.
+  property var hops: []
   property double bytesRead: 0
   property double bytesWritten: 0
   property string statusText: "Checking…"
@@ -221,8 +224,13 @@ Item {
     exitCountry = parsed.exitCountry
     exitCountryName = parsed.exitCountryName
     requestedExit = parsed.requestedExit
+    // Lists only when they change. A fresh array on every poll rebuilds what
+    // is drawn from it: the hops under a pointer, dropping their tooltip, and
+    // the exit picker's rows while someone is scrolling them.
+    if (!_sameList(excludedExits, parsed.excludedExits)) excludedExits = parsed.excludedExits
     circuitAgeSec = parsed.circuitAgeSec
-    path = parsed.path
+    if (!_sameList(path, parsed.path)) path = parsed.path
+    if (!_sameList(hops, parsed.hops)) hops = parsed.hops
     bytesRead = parsed.bytesRead
     bytesWritten = parsed.bytesWritten
     warnings = parsed.warnings
@@ -239,7 +247,10 @@ Item {
       // Not on the first reading: bridges already on when the shell starts were
       // switched on some other time, not just now.
       if (_notifiedState !== "")
-        notify(Model.bridgesNotification(bridgeState, nextBridges, notificationPolicy, _bridgeActionPending))
+        // Only connect's own fallback is news; any other switch was someone's
+        // deliberate choice, made here or in a terminal.
+        notify(Model.bridgesNotification(bridgeState, nextBridges, notificationPolicy,
+          _bridgeActionPending || !(_actionWasConnect && !!actionProcess && actionProcess.running)))
       // Only on a change: the detail is a local file read, but it is not part
       // of the poll and has no business running on every one.
       var bridgesChanged = nextBridges !== bridgeState || (nextBridges !== "off" && bridgeDetail === null)
@@ -248,6 +259,8 @@ Item {
     }
     noteConnectionState()
   }
+
+  function _sameList(a, b) { return JSON.stringify(a) === JSON.stringify(b) }
 
   // ---- notifications -----------------------------------------------------
   //

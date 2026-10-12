@@ -17,5 +17,38 @@
  "bytesWritten": 3311200,
  "statusText": "All traffic through Tor via DE",
  "warnings": [],
- "controlPort": true
+ "controlPort": true,
+ "bridges": "off",
+ "excludedExits": [],
+ "hops": [
+  {
+   "cc": "fr",
+   "nickname": "exampleGuard",
+   "flags": [
+    "Fast",
+    "Guard",
+    "Stable"
+   ],
+   "bandwidthKBps": 31200
+  },
+  {
+   "cc": "nl",
+   "nickname": "exampleMiddle",
+   "flags": [
+    "Fast",
+    "Stable"
+   ],
+   "bandwidthKBps": 8400
+  },
+  {
+   "cc": "de",
+   "nickname": "exampleExit",
+   "flags": [
+    "Exit",
+    "Fast",
+    "Stable"
+   ],
+   "bandwidthKBps": 64500
+  }
+ ]
 }

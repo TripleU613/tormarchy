@@ -88,7 +88,9 @@ Left click opens it, right click toggles, middle click gets a new circuit. Hover
 it for the status in words.
 
 Inside: `j`/`k` to move, `t` toggle, `n` new circuit, `e` exit country,
-`s` measure latency, `r` refresh, `esc` to close.
+`s` measure latency, `d` leak check, `b` bridges, `r` refresh, `esc` to close.
+Hover a hop in the circuit for the relay behind it — name, speed, and what the
+network trusts it with.
 
 The onion in the bar says where you are:
 
@@ -103,6 +105,44 @@ The onion in the bar says where you are:
 The switch can be turned off while it's still connecting, which cancels the
 connection.
 
+### Leak check
+
+The panel's answer to "is this actually working?". It asks check.torproject.org
+whether you're coming from Tor, tries to reach an IPv6 host directly (which
+should fail), and checks DNS, forwarding and your clock — the same checks as
+`tormarchy doctor`, listed one per line. In browser-only it checks the proxy
+itself.
+
+It only runs when you ask. Each run is real requests to real hosts, and a tool
+that phones out on a timer is a traffic pattern of its own. Changing anything —
+connecting, switching mode — clears the old result rather than leaving it
+vouching for a setup that's gone.
+
+### Bridges
+
+If the network you're on blocks Tor, bridges get you in. Get some from
+[bridges.torproject.org](https://bridges.torproject.org/options) or
+[@GetBridgesBot](https://t.me/GetBridgesBot) on Telegram, copy them, and hit
+**Paste bridges**. You'll see what you pasted — how many, which transports, and
+whether this machine can run them — before anything changes. **Use these**
+switches Tor over.
+
+The lines go to `tormarchy` over stdin and nowhere else: never on a command line
+(where any process on the machine could read them), never in a file you point
+it at. Once applied they live in a root-only file; the panel only ever sees the
+count. If you've saved bridges, a connect that stalls retries through them on
+its own.
+
+### Notifications
+
+When something's wrong and you might not be looking at the bar: the kill switch
+engaging (critical, stays until it's dealt with), Tor coming back, a connect
+that fails while the panel's closed. One toast, updated in place, never a pile.
+They go through Omarchy's own notifications, so do-not-disturb applies.
+
+Set `notifications` in the plugin's settings to `all` to also hear about
+connects and the bridge fallback, or `off` for silence.
+
 ## Commands
 
 | | |
@@ -112,14 +152,45 @@ connection.
 | `tormarchy status` | What's happening. |
 | `tormarchy ip` | Your circuit and exit, straight from Tor. Doesn't phone anyone to ask. |
 | `tormarchy newnym` | New circuit. |
-| `tormarchy exit de` | Leave from Germany. `--list` shows what's available. |
-| `tormarchy bridge` | For networks that block Tor. |
+| `tormarchy exit de` | Leave from Germany. `--list` shows what's available, `auto` lets Tor pick. |
+| `tormarchy exit --exclude us,ru` | Never leave from these. Tor still picks from everywhere else, which keeps far more of the network than pinning one. `none` clears it. |
+| `tormarchy bridge set < bridges.txt` | For networks that block Tor. `check` previews lines without changing anything, `on`/`off` switches saved ones. |
 | `tormarchy browser` | Launch a browser the firewall locks to Tor. `--list` shows what it found. |
-| `tormarchy doctor` | Check for leaks. |
+| `tormarchy doctor` | Check for leaks. `--json` for scripts. |
 | `tormarchy boot enable` | Reconnect at boot if Tor was on when you shut down. Off by default. |
 | `tormarchy panic` | Rip out every rule. For when things go wrong. |
 
 Tab completion for all of it, bash and zsh, installed by `setup`.
+
+## Shortcuts
+
+Nothing here edits your config. If you want them, paste them in.
+
+A key for the panel and one for the toggle, in `~/.config/hypr/bindings.lua`:
+
+```lua
+o.bind("SUPER + CTRL + SHIFT + T", "Tor", { panel = "tripleu.tor" })
+o.bind("SUPER + CTRL + SHIFT + O", "Toggle Tor", "omarchy-shell tripleu.tor toggleTor")
+```
+
+The toggle is a plain command on purpose. Omarchy's `{ ipc = "..." }` shorthand
+splits its target at the first dot, and `tripleu.tor` has one, so it would call
+the wrong thing.
+
+A Tor submenu in the Omarchy menu, inside the braces of
+`~/.config/omarchy/extensions/omarchy-menu.jsonc`:
+
+```jsonc
+"tor": {"icon": "󰕥", "label": "Tor"},
+"tor.toggle": {"icon": "󰕥", "label": "Route through Tor", "action": "omarchy-shell tripleu.tor toggleTor", "checked": "test -e /run/tormarchy/active"},
+"tor.panel": {"icon": "󰒓", "label": "Open panel", "action": "omarchy-shell tripleu.tor open"},
+"tor.newnym": {"icon": "󰑐", "label": "New circuit", "action": "omarchy-shell tripleu.tor newCircuit"},
+"tor.leaks": {"icon": "󰄬", "label": "Leak check", "action": "omarchy-shell tripleu.tor checkLeaks"},
+"tor.bridges": {"icon": "󰘘", "label": "Bridges", "action": "omarchy-shell tripleu.tor bridges"},
+```
+
+The ✓ check is a file test rather than `tormarchy status`, because the menu runs
+every check each time it opens.
 
 ## If it breaks
 

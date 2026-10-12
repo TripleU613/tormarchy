@@ -74,6 +74,7 @@ TORRC="/etc/tor/torrc"
 TORRC_DIR="/etc/tor/torrc.d"
 TORRC_BASE="$TORRC_DIR/00-tormarchy.conf"
 TORRC_EXIT="$TORRC_DIR/10-tormarchy-exit.conf"
+TORRC_EXCLUDE="$TORRC_DIR/11-tormarchy-exclude.conf"
 TORRC_BRIDGES="$TORRC_DIR/20-tormarchy-bridges.conf"
 
 BRIDGE_STASH="/etc/tormarchy/bridges.stash"
@@ -377,8 +378,14 @@ bootstrap_progress() {
   printf '%s' "$(cut -f1 <<<"$vitals")"
 }
 
-# The full path of the newest general circuit, as country codes:
-# "<id>\t<age>\t<exit-ip>\t<cc>,<cc>,<cc>"
+# The full path of the newest general circuit, as country codes, then what the
+# consensus says about each relay:
+# "<id>\t<age>\t<exit-ip>\t<cc>,<cc>,<cc>\t<nick>/<flags>/<kbps>,..."
+#
+# Flags are space-separated and limited to the ones worth showing; bandwidth is
+# the consensus weight's figure, in kilobytes per second. Nicknames are
+# [A-Za-z0-9]{1,19} by the directory spec, so neither "/" nor "," can occur in
+# a field.
 #
 # Resolving costs a fingerprint lookup and a GeoIP lookup per hop, so the answer
 # is cached against the circuit id: a path only changes when the circuit does.
@@ -431,11 +438,13 @@ circuit_path() {
     (( age < 0 )) && age=0
   fi
 
-  local cached_line cached_id cached_ip cached_ccs
+  # "v2" marks the layout that carries relay details. A line from before it has
+  # the circuit id in that place, so it simply misses and is rebuilt.
+  local cached_line cached_version cached_id cached_ip cached_ccs cached_relays
   if [[ -n $cache ]] && cached_line=$(read_cache_line "$cache"); then
-    IFS=$'\t' read -r cached_id cached_ip cached_ccs <<<"$cached_line"
-    if [[ $cached_id == "$id" && -n $cached_ccs ]]; then
-      printf '%s\t%s\t%s\t%s' "$id" "$age" "$cached_ip" "$cached_ccs"
+    IFS=$'\t' read -r cached_version cached_id cached_ip cached_ccs cached_relays <<<"$cached_line"
+    if [[ $cached_version == v2 && $cached_id == "$id" && -n $cached_ccs ]]; then
+      printf '%s\t%s\t%s\t%s\t%s' "$id" "$age" "$cached_ip" "$cached_ccs" "$cached_relays"
       return 0
     fi
   fi
@@ -452,11 +461,32 @@ circuit_path() {
 
   # One session for every fingerprint. Each ns/id reply carries a single "r "
   # line and replies arrive in request order, so addresses line up with hops.
-  local -a queries=() ips=()
-  local fp ns geo ip cc ccs=""
+  # The "s" and "w" lines after each "r" belong to that relay.
+  local -a queries=() ips=() relays=()
+  local fp ns geo ip cc ccs="" relay relay_ip details=""
   for fp in "${fps[@]}"; do queries+=("GETINFO ns/id/\$$fp"); done
   ns=$(tor_control "${queries[@]}" 2>/dev/null) || return 1
-  mapfile -t ips < <(awk '/^r /{print $7}' <<<"$ns")
+  mapfile -t relays < <(awk '
+    function flush() {
+      if (ip != "") print ip "\t" nick "/" flags "/" (bw == "" ? 0 : bw)
+      ip = ""; nick = ""; flags = ""; bw = ""
+    }
+    { sub(/\r$/, "") }
+    /^r / { flush(); nick = $2; ip = $7; next }
+    /^s / {
+      for (i = 2; i <= NF; i++)
+        if ($i ~ /^(Guard|Exit|Fast|Stable)$/) flags = flags (flags == "" ? "" : " ") $i
+      next
+    }
+    /^w / { if (match($0, /Bandwidth=[0-9]+/)) bw = substr($0, RSTART + 10, RLENGTH - 10); next }
+    END { flush() }
+  ' <<<"$ns")
+  for relay in "${relays[@]}"; do
+    IFS=$'\t' read -r relay_ip relay <<<"$relay"
+    [[ $relay =~ ^[A-Za-z0-9]{0,19}/[A-Za-z\ ]*/[0-9]+$ ]] || relay="//0"
+    ips+=("$relay_ip")
+    details+="${details:+,}$relay"
+  done
 
   # Every hop must resolve, or nothing is reported. A partial answer rendered as
   # a complete path is worse than no answer: two hops shown as the whole circuit
@@ -479,9 +509,9 @@ circuit_path() {
   if [[ -n $cache ]]; then
     # Best effort: the cache is an optimisation, and failing to store it must
     # not fail a lookup that already succeeded.
-    write_cache "$cache" "$id"$'\t'"$exit_ip"$'\t'"$ccs" || true
+    write_cache "$cache" "v2"$'\t'"$id"$'\t'"$exit_ip"$'\t'"$ccs"$'\t'"$details" || true
   fi
-  printf '%s\t%s\t%s\t%s' "$id" "$age" "$exit_ip" "$ccs"
+  printf '%s\t%s\t%s\t%s\t%s' "$id" "$age" "$exit_ip" "$ccs" "$details"
 }
 
 # Programs holding a live connection to something outside this machine.
@@ -771,7 +801,7 @@ cmd_status() {
   rules_present && connected=true
 
   local mode bootstrap=0 exit_cc="" exit_ip="" circuit_age=0
-  local bytes_read=0 bytes_written=0 path_ccs="" vitals info
+  local bytes_read=0 bytes_written=0 path_ccs="" relay_details="" vitals info
   mode=$(current_mode)
   [[ -z $mode ]] && $connected && mode="lan"
 
@@ -788,14 +818,14 @@ cmd_status() {
     fi
     if [[ ${bootstrap:-0} -ge 100 ]] && info=$(circuit_path); then
       local _id
-      IFS=$'\t' read -r _id circuit_age exit_ip path_ccs <<<"$info"
+      IFS=$'\t' read -r _id circuit_age exit_ip path_ccs relay_details <<<"$info"
       exit_cc=${path_ccs##*,}
       [[ $exit_cc == xx ]] && exit_cc=""
     fi
   fi
 
-  local requested_exit=""
-  [[ -r $TORRC_EXIT ]] && requested_exit=$(sed -n 's/^[[:space:]]*ExitNodes[[:space:]]*{\([a-zA-Z]\{2\}\)}.*/\1/p' "$TORRC_EXIT" | head -1)
+  local requested_exit
+  requested_exit=$(requested_exit)
 
   # The one inconsistency worth shouting about: rules on, no Tor behind them.
   # Traffic is not leaking, it is going nowhere -- but the user needs to know
@@ -833,15 +863,31 @@ cmd_status() {
     return 0
   fi
 
-  local path_json="" hop warnings_json=""
+  local path_json="" hops_json="" hop warnings_json="" excluded_json=""
   if [[ -n $path_ccs ]]; then
-    local -a hops
+    local -a hops relays=()
     IFS=',' read -ra hops <<<"$path_ccs"
-    for hop in "${hops[@]}"; do
+    [[ -n $relay_details ]] && IFS=',' read -ra relays <<<"$relay_details"
+    local i nick flags kbps flag flags_json
+    local -a flag_list
+    for i in "${!hops[@]}"; do
+      hop=${hops[i]}
       [[ -n $path_json ]] && path_json+=","
       path_json+="\"$(json_escape "$hop")\""
+      IFS='/' read -r nick flags kbps <<<"${relays[i]:-}"
+      [[ $kbps =~ ^[0-9]+$ ]] || kbps=0
+      # read -a rather than an unquoted expansion, which would also glob.
+      read -ra flag_list <<<"$flags"
+      flags_json=""
+      for flag in ${flag_list+"${flag_list[@]}"}; do flags_json+="${flags_json:+,}\"$(json_escape "$flag")\""; done
+      [[ -n $hops_json ]] && hops_json+=","
+      hops_json+="{\"cc\":\"$(json_escape "$hop")\",\"nickname\":\"$(json_escape "$nick")\",\"flags\":[$flags_json],\"bandwidthKBps\":$kbps}"
     done
   fi
+  local excluded
+  while IFS= read -r excluded; do
+    [[ -n $excluded ]] && excluded_json+="${excluded_json:+,}\"$(json_escape "$excluded")\""
+  done < <(excluded_exits)
   local warning
   for warning in ${warnings+"${warnings[@]}"}; do
     [[ -n $warnings_json ]] && warnings_json+=","
@@ -860,8 +906,10 @@ cmd_status() {
   "exitIp": "$(json_escape "$exit_ip")",
   "exitCountry": "$(json_escape "$exit_cc")",
   "requestedExit": "$(json_escape "$requested_exit")",
+  "excludedExits": [$excluded_json],
   "circuitAgeSec": ${circuit_age:-0},
   "path": [$path_json],
+  "hops": [$hops_json],
   "bytesRead": ${bytes_read:-0},
   "bytesWritten": ${bytes_written:-0},
   "statusText": "$(json_escape "$status_text")",
@@ -1103,8 +1151,91 @@ cmd_newnym() {
   echo "New circuit requested."
 }
 
+# The country exits are pinned to, or nothing.
+requested_exit() {
+  [[ -r $TORRC_EXIT ]] || return 0
+  sed -n 's/^[[:space:]]*ExitNodes[[:space:]]*{\([a-zA-Z]\{2\}\)}.*/\1/p' "$TORRC_EXIT" | head -1 | tr 'A-Z' 'a-z'
+}
+
+# Countries exits must never be in, one per line.
+excluded_exits() {
+  [[ -r $TORRC_EXCLUDE ]] || return 0
+  sed -n 's/^[[:space:]]*ExcludeExitNodes[[:space:]]*//p' "$TORRC_EXCLUDE" | head -1 \
+    | tr ',' '\n' | sed -n 's/^[[:space:]]*{\([a-zA-Z]\{2\}\)}[[:space:]]*$/\1/p' | tr 'A-Z' 'a-z'
+}
+
+# After a change to which exits are allowed.
+reload_for_exit_change() {
+  tor_is_running || return 0
+  systemctl reload tor.service 2>/dev/null || systemctl restart tor.service \
+    || die "wrote the config but could not reload tor"
+  publish_cookie || true
+  # A reload changes which exits new circuits may use, but the circuit
+  # already carrying traffic keeps its old exit until it ages out -- up to
+  # ten minutes of the panel saying one country and the traffic leaving from
+  # another. NEWNYM moves new streams onto a circuit built under the new rule.
+  tor_control 'SIGNAL NEWNYM' >/dev/null 2>&1 || true
+}
+
+# `exit --exclude de,us` / `exit --exclude none`. The opposite of pinning: Tor
+# still chooses, from everywhere but these. Unlike a pin it barely narrows the
+# pool, so it is the better tool for "anywhere but there".
+exit_exclude() {
+  local spec="${1:-}" cc
+  [[ -n $spec ]] || die "expected country codes, e.g. 'tormarchy exit --exclude de,us', or 'none'"
+  local -a codes=() parts=()
+  if [[ $spec != none ]]; then
+    IFS=',' read -ra parts <<<"$spec"
+    for cc in "${parts[@]}"; do
+      cc=${cc//[[:space:]]/}
+      [[ $cc =~ ^[A-Za-z][A-Za-z]$ ]] || die "not a two-letter country code: $cc"
+      cc=${cc,,}
+      [[ " ${codes[*]} " == *" $cc "* ]] || codes+=("$cc")
+    done
+    (( ${#codes[@]} > 0 )) || die "expected country codes, e.g. 'tormarchy exit --exclude de,us', or 'none'"
+    (( ${#codes[@]} <= 32 )) || die "too many countries; exclude at most 32"
+  fi
+
+  require_root
+  [[ -d $TORRC_DIR ]] || die "$TORRC_DIR is missing -- run setup first"
+
+  # Pinned to a country and excluding it leaves no exit at all, and tor fails
+  # in a way that looks like the network is down.
+  local pinned
+  pinned=$(requested_exit)
+  if [[ -n $pinned && " ${codes[*]} " == *" $pinned "* ]]; then
+    die "exits are pinned to ${pinned^^}, so it cannot also be excluded. Run 'tormarchy exit auto' first."
+  fi
+
+  if (( ${#codes[@]} == 0 )); then
+    rm -f "$TORRC_EXCLUDE"
+  else
+    local list=""
+    for cc in "${codes[@]}"; do list+="${list:+,}{$cc}"; done
+    cat >"$TORRC_EXCLUDE" <<CONF
+# Managed by tormarchy. Remove this file or run 'tormarchy exit --exclude none'.
+ExcludeExitNodes $list
+CONF
+    chmod 0644 "$TORRC_EXCLUDE"
+  fi
+
+  reload_for_exit_change
+
+  if (( ${#codes[@]} == 0 )); then
+    echo "No countries excluded. Tor may exit anywhere."
+  else
+    local shown="${codes[*]}"
+    echo "Exits will never be in ${shown^^}. New circuits follow the rule."
+  fi
+}
+
 cmd_exit() {
   local target="${1:-}"
+
+  if [[ $target == --exclude ]]; then
+    exit_exclude "${2:-}"
+    return
+  fi
 
   if [[ $target == --list ]]; then
     tor_is_running || die "tor is not running"
@@ -1122,15 +1253,23 @@ cmd_exit() {
     # Chunked rather than one giant pipeline: replies are only read after every
     # command is written, so thousands in one session would fill the socket
     # buffer in both directions and deadlock against tor.
+    #
+    # One bare country code per line, each once. The replies themselves are
+    # "250-ip-to-country/<ip>=<cc>", and printing those raw left the panel's
+    # picker -- which keeps only two-letter lines -- with nothing to offer.
     local -a queries=()
     local ip
-    for ip in "${ips[@]}"; do
-      queries+=("GETINFO ip-to-country/$ip")
-      if (( ${#queries[@]} >= 200 )); then
-        tor_control "${queries[@]}"; queries=()
-      fi
-    done
-    (( ${#queries[@]} > 0 )) && tor_control "${queries[@]}"
+    {
+      for ip in "${ips[@]}"; do
+        queries+=("GETINFO ip-to-country/$ip")
+        if (( ${#queries[@]} >= 200 )); then
+          tor_control "${queries[@]}"; queries=()
+        fi
+      done
+      (( ${#queries[@]} > 0 )) && tor_control "${queries[@]}"
+    } | tr -d '\r' \
+      | sed -n 's/^250[-+]ip-to-country\/[^=]*=\([a-zA-Z][a-zA-Z]\)$/\1/p' \
+      | tr 'A-Z' 'a-z' | sort -u
     return 0
   fi
 
@@ -1139,11 +1278,14 @@ cmd_exit() {
   elif [[ $target =~ ^[A-Za-z][A-Za-z]$ ]]; then
     target=${target,,}
   else
-    die "expected a two-letter country code, 'auto', or --list"
+    die "expected a two-letter country code, 'auto', --list, or --exclude"
   fi
 
   require_root
   [[ -d $TORRC_DIR ]] || die "$TORRC_DIR is missing -- run setup first"
+  if [[ $target != auto ]] && excluded_exits | grep -qx -- "$target"; then
+    die "${target^^} is excluded, so exits cannot be pinned there. Run 'tormarchy exit --exclude none' first."
+  fi
 
   if [[ $target == auto ]]; then
     rm -f "$TORRC_EXIT"
@@ -1156,16 +1298,7 @@ CONF
     chmod 0644 "$TORRC_EXIT"
   fi
 
-  if tor_is_running; then
-    systemctl reload tor.service 2>/dev/null || systemctl restart tor.service \
-      || die "wrote the config but could not reload tor"
-    publish_cookie || true
-    # A reload changes which exits new circuits may use, but the circuit
-    # already carrying traffic keeps its old exit until it ages out -- up to
-    # ten minutes of the panel saying one country and the traffic leaving from
-    # another. NEWNYM moves new streams onto a circuit built under the new rule.
-    tor_control 'SIGNAL NEWNYM' >/dev/null 2>&1 || true
-  fi
+  reload_for_exit_change
 
   if [[ $target == auto ]]; then
     echo "Exit country cleared. Tor will choose."
@@ -1536,9 +1669,9 @@ cmd_pingd() {
 cmd_ip() {
   tor_is_running || die "tor is not running"
 
-  local info id age exit_ip path_ccs
+  local info id age exit_ip path_ccs _relays
   info=$(circuit_path) || die "no general-purpose circuit built yet: $(cookie_hint)"
-  IFS=$'\t' read -r id age exit_ip path_ccs <<<"$info"
+  IFS=$'\t' read -r id age exit_ip path_ccs _relays <<<"$info"
 
   if [[ ${1:-} == --json ]]; then
     printf '{"circuitId":"%s","exitIp":"%s","path":"%s","ageSec":%s}\n' \
@@ -2221,7 +2354,7 @@ cmd_uninstall() {
   # Anything left by the old fifteen-executable layout.
   rm -f "$BIN_DIR"/tormarchy-* 2>/dev/null || true
   rm -rf /usr/local/lib/tormarchy
-  rm -f "$TORRC_BASE" "$TORRC_EXIT" "$TORRC_BRIDGES"
+  rm -f "$TORRC_BASE" "$TORRC_EXIT" "$TORRC_EXCLUDE" "$TORRC_BRIDGES"
   rm -f "$POLKIT_ACTIONS/com.tormarchy.policy" "$POLKIT_RULES/49-tormarchy.rules"
   rm -f "$BASH_COMPLETION/tormarchy" "$ZSH_COMPLETION/_tormarchy"
   echo "  helpers, torrc snippets, polkit files and completion"
@@ -2281,6 +2414,7 @@ tormarchy -- route traffic through Tor, from the Omarchy bar.
                                            control port. Makes no request.
   newnym                                   New circuit.
   exit <cc>|auto|--list                    Pin or clear the exit country.
+  exit --exclude <cc,cc>|none              Never exit in these countries.
   bridge <status|set|check|on|off|transports>
                                            Use bridges where Tor is blocked.
   browser [name]|--list                    Launch a browser, in an instance of

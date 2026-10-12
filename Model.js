@@ -60,8 +60,11 @@ function parseStatus(raw) {
     // Bash emits the code; the display name is a JS-side concern.
     exitCountryName: countryName(data.exitCountry),
     requestedExit: String(data.requestedExit || ""),
+    excludedExits: countryCodes(data.excludedExits),
     circuitAgeSec: Number(data.circuitAgeSec || 0),
     path: Array.isArray(data.path) ? data.path : [],
+    // Absent from older helpers; the path alone still renders.
+    hops: parseHops(data.hops),
     bytesRead: Number(data.bytesRead || 0),
     bytesWritten: Number(data.bytesWritten || 0),
     statusText: String(data.statusText || ""),
@@ -70,6 +73,56 @@ function parseStatus(raw) {
     bridges: ["active", "stashed", "off"].indexOf(String(data.bridges)) !== -1 ? String(data.bridges) : undefined,
     warnings: Array.isArray(data.warnings) ? data.warnings : []
   }
+}
+
+function countryCodes(list) {
+  var out = []
+  if (!Array.isArray(list)) return out
+  for (var i = 0; i < list.length; i++) {
+    var cc = String(list[i] || "").toLowerCase()
+    if (/^[a-z]{2}$/.test(cc) && out.indexOf(cc) === -1) out.push(cc)
+  }
+  return out
+}
+
+function parseHops(list) {
+  var out = []
+  if (!Array.isArray(list)) return out
+  for (var i = 0; i < list.length; i++) {
+    var h = list[i] || {}
+    out.push({
+      cc: String(h.cc || "").toLowerCase(),
+      nickname: String(h.nickname || ""),
+      flags: Array.isArray(h.flags) ? h.flags.map(String) : [],
+      bandwidthKBps: Math.max(0, Number(h.bandwidthKBps) || 0)
+    })
+  }
+  return out
+}
+
+// Consensus bandwidth, which tor gives in kilobytes per second.
+function formatRelayBandwidth(kbps) {
+  var n = Number(kbps)
+  if (!isFinite(n) || n <= 0) return ""
+  if (n < 1000) return qsTr("%1 KB/s").arg(Math.round(n))
+  var mb = n / 1000
+  return qsTr("%1 MB/s").arg(mb < 10 ? mb.toFixed(1) : Math.round(mb))
+}
+
+// "Guard · Sweden · relayname · 12 MB/s · Fast, Stable". The role is the hop's
+// position; a Guard or Exit flag repeating it is left out.
+function hopTooltip(hop, index, total, cc) {
+  var parts = [hopRole(index, total)]
+  var code = String((hop && hop.cc) || cc || "").toLowerCase()
+  if (code !== "" && code !== "xx") parts.push(countryName(code))
+  if (!hop) return parts.join(" · ")
+  if (hop.nickname !== "") parts.push(hop.nickname)
+  var bw = formatRelayBandwidth(hop.bandwidthKBps)
+  if (bw !== "") parts.push(bw)
+  var role = String(parts[0])
+  var flags = hop.flags.filter(function(f) { return String(f) !== role })
+  if (flags.length > 0) parts.push(flags.join(", "))
+  return parts.join(" · ")
 }
 
 function clampPercent(value) {
@@ -155,23 +208,52 @@ function countryName(code) {
 
 // Label for the currently pinned exit. "Automatic" is the honest word for an
 // unpinned exit: Tor is choosing, we are not.
-function exitLabel(requested) {
+// What the exit picker shows. On Automatic with countries excluded, that is the
+// request: "Not US, RU" under the EXIT caption. A pinned exit makes exclusions
+// moot -- tor uses only that country -- so it shows just the country.
+function exitLabel(requested, excluded) {
   var cc = String(requested || "").toLowerCase()
-  return cc === "" ? qsTr("Automatic") : countryName(cc)
+  if (cc !== "") return countryName(cc)
+  var never = countryCodes(excluded)
+  if (never.length > 0) return qsTr("Not %1").arg(never.join(", ").toUpperCase())
+  return qsTr("Automatic")
 }
 
-// Dropdown options: Automatic first, then every country Tor reported an exit
-// relay in, sorted by the name we actually display rather than by code.
-function exitOptions(codes) {
-  var options = [{ value: "auto", label: qsTr("Automatic"), description: qsTr("Let Tor choose the exit") }]
+// Automatic, then the countries picked recently -- the ones someone is most
+// likely after -- then everything else alphabetically. A recent country with no
+// exits right now is left out rather than offered as a choice that would fail.
+//
+// An excluded country is left out too: pinning exits there is refused, since it
+// would leave no exit at all.
+function exitOptions(codes, recent, excluded) {
+  var excludedList = countryCodes(excluded)
+  // The trigger shows the selected option's own label, so this is where
+  // "Not US, RU" has to live for it to be seen.
+  var options = [{ value: "auto", label: exitLabel("", excludedList),
+                   description: excludedList.length > 0
+                     ? qsTr("Tor chooses from everywhere else")
+                     : qsTr("Let Tor choose the exit") }]
+  var available = {}
+  var never = {}
+  for (var k = 0; k < excludedList.length; k++) never[excludedList[k]] = true
   var list = []
   for (var i = 0; i < (codes || []).length; i++) {
     var cc = String(codes[i] || "").toLowerCase()
-    if (cc.length !== 2) continue
+    if (cc.length !== 2 || available[cc] || never[cc]) continue
+    available[cc] = true
     list.push({ value: cc, label: countryName(cc) })
   }
+  var pinned = {}
+  var first = []
+  for (var j = 0; j < (recent || []).length; j++) {
+    var r = String(recent[j] || "").toLowerCase()
+    if (!available[r] || pinned[r]) continue
+    pinned[r] = true
+    first.push({ value: r, label: countryName(r), description: qsTr("Recent") })
+  }
+  list = list.filter(function(o) { return !pinned[o.value] })
   list.sort(function(a, b) { return a.label.localeCompare(b.label) })
-  return options.concat(list)
+  return options.concat(first, list)
 }
 
 // Pinning exits shrinks the relay pool you can leave through, which is worse
