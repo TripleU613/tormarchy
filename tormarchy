@@ -60,6 +60,10 @@ CONTROL_PORT=9051
 # as long as the timeout allows. The ceiling is far above any real reply: the
 # largest is a full circuit-status listing, a few hundred bytes per circuit.
 CONTROL_REPLY_BYTE_LIMIT=262144
+# check.torproject.org's answer is a few dozen bytes. The leak check prints part
+# of it, and what it prints goes into the shell that runs the bar, so a larger
+# answer is a failed check rather than something to pass along.
+CHECK_REPLY_BYTE_LIMIT=4096
 
 # Tor's virtual range for .onion names resolved via AutomapHostsOnResolve.
 VIRT_NET="10.192.0.0/10"
@@ -2026,6 +2030,22 @@ RULES
 
 # ---- diagnostics ----
 
+# check.torproject.org's answer, through whatever curl arguments are given, or
+# failure. Read to one byte past the limit and no further, so an answer that
+# never ends costs nothing and is refused.
+ask_check_torproject() {
+  local LC_ALL=C reply
+  reply=$(set -o pipefail; curl -sf -m 25 "$@" https://check.torproject.org/api/ip 2>/dev/null \
+    | head -c "$(( CHECK_REPLY_BYTE_LIMIT + 1 ))") || return 1
+  (( ${#reply} <= CHECK_REPLY_BYTE_LIMIT )) || return 1
+  printf '%s' "$reply"
+}
+
+# The "IP" field of that answer, only when it is shaped like an address.
+seen_ip_of() {
+  sed -n 's/.*"IP":"\([0-9A-Fa-f.:]\{2,45\}\)".*/\1/p' <<<"$1" | head -n 1
+}
+
 cmd_doctor() {
   local json=false
   [[ ${1:-} == --json ]] && json=true
@@ -2107,11 +2127,10 @@ cmd_doctor() {
     # thing browser-only does offer: that the proxy really leaves through Tor.
     if ! tor_is_running; then
       cid proxy; skip "browser-only mode with tor stopped: there is no proxy to check"
-    elif body=$(curl -sf -m 25 --socks5-hostname "127.0.0.1:$SOCKS_PORT" \
-        https://check.torproject.org/api/ip 2>/dev/null); then
+    elif body=$(ask_check_torproject --socks5-hostname "127.0.0.1:$SOCKS_PORT"); then
       cid proxy
       if grep -q '"IsTor":true' <<<"$body"; then
-        seen_ip=$(sed -n 's/.*"IP":"\([^"]*\)".*/\1/p' <<<"$body")
+        seen_ip=$(seen_ip_of "$body")
         pass "the SOCKS proxy on 127.0.0.1:$SOCKS_PORT leaves through Tor" \
           "${seen_ip:+exit as seen from outside: $seen_ip}"
       else
@@ -2125,9 +2144,9 @@ cmd_doctor() {
     cid routing; skip "not connected, so there is nothing to leak"
   else
     cid exit
-    if body=$(curl -sf -m 25 https://check.torproject.org/api/ip 2>/dev/null); then
+    if body=$(ask_check_torproject); then
       if grep -q '"IsTor":true' <<<"$body"; then
-        seen_ip=$(sed -n 's/.*"IP":"\([^"]*\)".*/\1/p' <<<"$body")
+        seen_ip=$(seen_ip_of "$body")
         pass "check.torproject.org confirms this connection is Tor" \
           "${seen_ip:+exit as seen from outside: $seen_ip}"
       else

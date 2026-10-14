@@ -225,7 +225,11 @@ function exitLabel(requested, excluded) {
 //
 // An excluded country is left out too: pinning exits there is refused, since it
 // would leave no exit at all.
-function exitOptions(codes, recent, excluded) {
+//
+// The country exits are pinned to is always listed, even before the list has
+// loaded or when it has no exits right now: the picker's trigger shows the
+// selected option's label, and without an option it would show a bare code.
+function exitOptions(codes, recent, excluded, requested) {
   var excludedList = countryCodes(excluded)
   // The trigger shows the selected option's own label, so this is where
   // "Not US, RU" has to live for it to be seen.
@@ -253,6 +257,8 @@ function exitOptions(codes, recent, excluded) {
   }
   list = list.filter(function(o) { return !pinned[o.value] })
   list.sort(function(a, b) { return a.label.localeCompare(b.label) })
+  var current = String(requested || "").toLowerCase()
+  if (/^[a-z]{2}$/.test(current) && !available[current]) first.unshift({ value: current, label: countryName(current) })
   return options.concat(first, list)
 }
 
