@@ -142,6 +142,7 @@ Panel {
     border.color: hot || open ? Util.alpha(root.foreground, 0.55) : root.surfaceLine
 
     Text {
+      textFormat: Text.PlainText
       id: tileGlyph
       anchors.left: parent.left
       anchors.leftMargin: Style.space(12)
@@ -161,6 +162,7 @@ Panel {
       spacing: Style.space(1)
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         elide: Text.ElideRight
         text: tile.title
@@ -170,6 +172,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         elide: Text.ElideRight
         visible: text !== ""
@@ -205,6 +208,7 @@ Panel {
   component InfoDot: Text {
     id: info
     property string tip: ""
+    textFormat: Text.PlainText
     text: "\u{f02fd}"
     color: infoMouse.containsMouse ? root.foreground : root.dim
     font.family: root.fontFamily
@@ -274,6 +278,7 @@ Panel {
       spacing: Style.space(5)
 
       Text {
+        textFormat: Text.PlainText
         anchors.verticalCenter: parent.verticalCenter
         text: chip.glyph
         color: chip.tint
@@ -332,6 +337,7 @@ Panel {
     clip: true
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       elide: Text.ElideRight
       text: parent.label
@@ -342,6 +348,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       width: parent.width
       elide: Text.ElideRight
       // A cell may supply its figure as child content instead of a string --
@@ -698,6 +705,7 @@ Panel {
                 spacing: Style.space(3)
 
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   horizontalAlignment: Text.AlignHCenter
                   // Still a percentage after bootstrap, while connect proves a
@@ -742,6 +750,7 @@ Panel {
                 // Automatic it says nothing about where you came out, and this
                 // is where that gets answered.
                 Text {
+                  textFormat: Text.PlainText
                   width: parent.width
                   elide: Text.ElideRight
                   text: tor.circuitReady && tor.exitCountry !== ""
@@ -863,6 +872,7 @@ Panel {
                     // printed inside the gauge as well, which said the same
                     // thing twice in one card.
                     Text {
+                      textFormat: Text.PlainText
                       width: parent.width
                       horizontalAlignment: Text.AlignHCenter
                       elide: Text.ElideRight
@@ -873,6 +883,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       width: parent.width
                       horizontalAlignment: Text.AlignHCenter
                       elide: Text.ElideRight
@@ -910,6 +921,7 @@ Panel {
                 opacity: available ? 1.0 : 0.45
 
                 Text {
+                  textFormat: Text.PlainText
                   anchors.centerIn: parent
                   width: parent.width - Style.space(12)
                   horizontalAlignment: Text.AlignHCenter
@@ -976,6 +988,7 @@ Panel {
                       spacing: Style.space(3)
 
                       Text {
+                        textFormat: Text.PlainText
                         anchors.verticalCenter: parent.verticalCenter
                         visible: index > 0
                         text: "\u2192"
@@ -985,6 +998,7 @@ Panel {
                       }
 
                       Text {
+                        textFormat: Text.PlainText
                         anchors.verticalCenter: parent.verticalCenter
                         text: modelData
                         color: root.foreground
@@ -1125,6 +1139,7 @@ Panel {
               readonly property var shown: preview ? preview : (current && current.ok ? current : null)
 
               Text {
+                textFormat: Text.PlainText
                 visible: !!bridgeSection.preview
                 text: qsTr("Pasted · %1").arg(Model.bridgeCountText(bridgeSection.preview))
                 color: root.foreground
@@ -1334,6 +1349,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       anchors.centerIn: parent
                       width: parent.width - Style.space(8)
                       horizontalAlignment: Text.AlignHCenter

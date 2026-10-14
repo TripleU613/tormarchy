@@ -374,6 +374,33 @@ if grep -nE '^[[:space:]]*(SearchableDropdown|TextField|TextInput|TextEdit|TextA
 else
   ok "the panel creates no editable text field"
 fi
+# A Text left on its default format renders anything that looks like HTML as
+# rich text, and rich text loads images, from the network if a tag says so. The
+# panel shows text that came from outside (the leak check's answer, helper
+# messages), so every Text in it is plain.
+if python3 - <<'PY'
+import re, sys
+src = open("Panel.qml").read().split("\n")
+bad = []
+for i, line in enumerate(src):
+    if not re.search(r"(^|:)\s*Text \{\s*$", line):
+        continue
+    depth, j, found = 0, i, False
+    while j < len(src):
+        depth += src[j].count("{") - src[j].count("}")
+        if "textFormat: Text.PlainText" in src[j]:
+            found = True
+        if depth <= 0 and j > i:
+            break
+        j += 1
+    if not found:
+        bad.append(f"    Panel.qml:{i + 1}: {line.strip()}")
+if bad:
+    print("\n".join(bad))
+    sys.exit(1)
+PY
+then ok "every Text in the panel is plain text"
+else bad "a Text in the panel renders as rich text (above)"; fi
 want "the clipboard is read through the capped read" Service.qml 'clipboardProcess.command = Model.clipboardArgv()'
 reject "and never straight into the shell" Service.qml '["wl-paste"'
 helper_limit=$(sed -n 's/^BRIDGE_INPUT_BYTE_LIMIT=\([0-9]*\)$/\1/p' tormarchy)

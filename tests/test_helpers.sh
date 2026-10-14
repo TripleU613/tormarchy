@@ -369,6 +369,26 @@ curl() {
 json=$(cmd_doctor --json); rc=$?
 is "a leak is a failure, counted" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["ok"], d["failures"])' "$json" 2>/dev/null)" "False 2"
 [[ $rc != 0 ]] && ok "and the exit status says so" || bad "doctor --json exited 0 with failures"
+# What the leak check prints goes into the shell, so the answer it quotes from
+# is capped, and only an address is quoted.
+curl() {
+  case "$*" in
+  *-6*) return 7 ;;
+  *check.torproject.org*) printf '{"IsTor":true,"IP":"<img src=http://example.invalid/x>"}' ;;
+  esac
+}
+json=$(cmd_doctor --json)
+is "a check answer whose IP is not an address is not quoted" \
+  "$(python3 -c 'import json,sys; print([c["detail"] for c in json.loads(sys.argv[1])["checks"] if "confirms" in c["text"]][0])' "$json" 2>/dev/null)" ""
+curl() {
+  case "$*" in
+  *-6*) return 7 ;;
+  *check.torproject.org*) printf '{"IsTor":true,"IP":"185.220.101.4","pad":"%s"}' "$(head -c 8192 /dev/zero | tr '\0' x)" ;;
+  esac
+}
+json=$(cmd_doctor --json)
+is "an answer over the limit is a failed check, not something passed along" \
+  "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["ok"], len(sys.argv[1]) < 8192)' "$json" 2>/dev/null)" "False True"
 printf 'socks\n' >"$MODE_FILE"
 rules_present() { return 1; }
 curl() { [[ $* == *--socks5-hostname* ]] && printf '{"IsTor":true,"IP":"185.220.101.4"}'; }
