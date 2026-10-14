@@ -254,8 +254,10 @@ def paste(svc):
 os.environ["TORMARCHY_STUB_BRIDGE_CHECK"] = os.path.join(FIXTURES, "bridge-check-ok.json")
 svc = service(fixture("on"))
 paste(svc)
-check(ran("wl-paste") and ran("wl-paste")[0] == ["wl-paste", "--no-newline", "--type", "text/plain"],
-      "a paste reads the clipboard as plain text")
+read = ran("wl-paste")
+check(read and read[0][:2] == ["bash", "-c"] and "--type text/plain" in read[0][2]
+      and "head -c" in read[0][2] and read[0][3:5] == ["paste-bridges", "65536"],
+      "a paste reads the clipboard as plain text, capped at the helper's limit")
 checked = [data for cmd, data in stubs.STDIN_LOG if "bridge check" in cmd]
 check(len(checked) == 1 and checked[0].strip() == BRIDGE_LINES.strip(),
       "the pasted lines reach `bridge check` over stdin, whole")
@@ -313,6 +315,18 @@ paste(svc)
 check(ran("bridge check") == [] and svc.property("bridgeMessage") != "",
       "an empty clipboard says so, and runs nothing")
 svc.deleteLater()
+# More than the limit: the capped read refuses it, and nothing goes further.
+os.environ["TORMARCHY_STUB_CLIPBOARD"] = os.path.join(FIXTURES, "bridges.txt")
+for code, what in ((3, "too much on the clipboard"), (4, "a clipboard that will not answer")):
+    os.environ["TORMARCHY_STUB_CLIPBOARD_EXIT"] = str(code)
+    before = len(ran("bridge check"))
+    svc = service(fixture("on"))
+    paste(svc)
+    check(len(ran("bridge check")) == before and svc.property("bridgeMessage") != ""
+          and svc.property("_pendingBridgeText") == "" and not svc.property("bridgePreview"),
+          f"{what} says so, holds nothing, and runs nothing")
+    svc.deleteLater()
+del os.environ["TORMARCHY_STUB_CLIPBOARD_EXIT"]
 for name in ("TORMARCHY_STUB_CLIPBOARD", "TORMARCHY_STUB_BRIDGE_CHECK"):
     del os.environ[name]
 

@@ -445,7 +445,7 @@ Item {
   function pasteBridges() {
     if (bridgeWorking || !installed) return
     cancelBridges()
-    clipboardProcess.command = ["wl-paste", "--no-newline", "--type", "text/plain"]
+    clipboardProcess.command = Model.clipboardArgv()
     clipboardProcess.running = true
   }
 
@@ -745,7 +745,15 @@ Item {
     command: []
     stdout: StdioCollector { id: clipboardStdout; waitForEnd: true }
     onExited: function(exitCode) {
-      var text = exitCode === 0 ? String(clipboardStdout.text || "") : ""
+      if (exitCode === 3) {
+        root.bridgeMessage = qsTr("Too much on the clipboard to be bridge lines.")
+        return
+      }
+      if (exitCode !== 0) {
+        root.bridgeMessage = qsTr("Could not read the clipboard.")
+        return
+      }
+      var text = String(clipboardStdout.text || "")
       if (text.trim() === "") {
         root.bridgeMessage = qsTr("The clipboard is empty. Copy your bridge lines first.")
         return

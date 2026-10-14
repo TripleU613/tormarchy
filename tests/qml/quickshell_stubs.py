@@ -289,8 +289,11 @@ def _proc_run(self):
         text = _fixture("TORMARCHY_STUB_BRIDGES") or '{"state":"off","count":0,"transports":[]}'
     elif "bridge check" in cmd:
         text = _fixture("TORMARCHY_STUB_BRIDGE_CHECK") or ""
-    elif argv[:1] == ["wl-paste"]:
-        text = _fixture("TORMARCHY_STUB_CLIPBOARD") or ""
+    elif "wl-paste" in cmd:
+        # The capped read in Model.clipboardArgv: 3 is a clipboard over the
+        # limit, 4 one that would not answer, and neither prints anything.
+        code = int(os.environ.get("TORMARCHY_STUB_CLIPBOARD_EXIT", "0"))
+        text = (_fixture("TORMARCHY_STUB_CLIPBOARD") or "") if code == 0 else ""
     elif "cmp -s" in cmd:
         # The installed helper against the bundled one: 1 when they differ.
         code = int(os.environ.get("TORMARCHY_STUB_HELPER_STALE", "0"))
