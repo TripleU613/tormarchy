@@ -361,6 +361,19 @@ if bad:
 PY
 then ok "the pasted text is only stored, cleared, and written to stdin"
 else bad "the pasted text is used somewhere other than stdin (see above)"; fi
+# The clipboard is sent by whichever app copied last, as much as it likes, and
+# the shell process holds the whole bar. Read whole, an endless offer exhausts
+# it before the helper's limit is ever reached (HANCORE-linux, 11214). The read
+# is capped at the helper's own limit; tests/clipboard.js runs it for real.
+want "the clipboard is read through the capped read" Service.qml 'clipboardProcess.command = Model.clipboardArgv()'
+reject "and never straight into the shell" Service.qml '["wl-paste"'
+helper_limit=$(sed -n 's/^BRIDGE_INPUT_BYTE_LIMIT=\([0-9]*\)$/\1/p' tormarchy)
+panel_limit=$(sed -n 's/^var BRIDGE_INPUT_LIMIT = \([0-9]*\)$/\1/p' Model.js)
+if [[ -n $helper_limit && $helper_limit == "$panel_limit" ]]; then
+  ok "a paste is capped at exactly what the helper reads ($helper_limit bytes)"
+else
+  bad "the paste cap ($panel_limit) is not the helper's limit ($helper_limit)"
+fi
 reject "the root helper takes no bridge file argument" tormarchy 'bridge set <file'
 want "the panel-readable summary is counts only" tormarchy 'bridge_counts "$BRIDGE_STASH" >"$staging"'
 want "setup brings an older bridge stash within the panel's reach" tormarchy 'chmod 0711 "$(dirname "$BRIDGE_STASH")"'

@@ -357,6 +357,8 @@ group "Model"
 
 if command -v node >/dev/null 2>&1; then
   node tests/test_model.js || failures=$(( failures + 1 ))
+  # The clipboard read, run through bash against a wl-paste that never stops.
+  node tests/clipboard.js || failures=$(( failures + 1 ))
 else
   note "node not installed, skipping Model.js tests"
 fi

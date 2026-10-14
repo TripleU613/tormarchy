@@ -601,6 +601,35 @@ function parseBridgeReport(raw) {
   }
 }
 
+// The most `bridge check` and `bridge set` read, so the most a paste can be.
+// The same number as the helper's BRIDGE_INPUT_BYTE_LIMIT; test_decisions
+// holds the two together.
+var BRIDGE_INPUT_LIMIT = 65536
+var CLIPBOARD_TIMEOUT_S = 5
+
+// The clipboard read behind Paste bridges, capped before any of it reaches the
+// shell. The clipboard is whatever the app that copied last chooses to send,
+// for as long as it chooses to send it, and the shell process runs the whole
+// bar: collected whole, an endless offer grows it until memory runs out, long
+// before the helper's own limit is reached. So one byte past the limit is the
+// most ever read, and the read gets a few seconds. Exit 3 is more than the
+// limit, exit 4 a clipboard that would not answer; neither prints any text.
+// Exit 1 from wl-paste is nothing copied, or nothing copied as text, and comes
+// through as an empty paste.
+function clipboardArgv(timeoutS) {
+  var script = [
+    'export LC_ALL=C',
+    'out=$(timeout -k 1 "$2" wl-paste --no-newline --type text/plain 2>/dev/null | head -c "$(( $1 + 1 ))"',
+    '      printf " %s" "${PIPESTATUS[0]}")',
+    'status=${out##* } text=${out% *}',
+    '(( ${#text} <= $1 )) || exit 3',
+    '(( status <= 1 )) || exit 4',
+    'printf "%s" "$text"'
+  ].join("\n")
+  return ["bash", "-c", script, "paste-bridges",
+          String(BRIDGE_INPUT_LIMIT), String(timeoutS || CLIPBOARD_TIMEOUT_S)]
+}
+
 // "4 bridges", the breakdown by transport listed beneath it.
 function bridgeCountText(report) {
   if (!report || !report.ok || report.count === 0) return qsTr("No bridge lines")
