@@ -123,6 +123,12 @@ is(picker[0].label, "Not US", "with exclusions, Automatic is labelled with them 
 is(exitOptions(["de"], [], [])[0].label, "Automatic", "without exclusions it is just Automatic");
 is(exitLabel("", ["us", "ru"]), "Not US, RU", "on Automatic the picker reads as the exclusions");
 is(exitLabel("de", ["us"]), "Germany", "a pinned exit makes exclusions moot, so it shows only the country");
+// The picker's trigger shows the selected option's label, so the pinned country
+// has to be an option even before the list has loaded.
+is(exitOptions([], [], [], "de").map(o => o.value + ":" + o.label).join(","), "auto:Automatic,de:Germany",
+  "a pinned exit is listed, by name, before the countries have loaded");
+is(exitOptions(["de", "nl"], [], [], "de").filter(o => o.value === "de").length, 1,
+  "and only once when it is in the list anyway");
 
 // The leak check.
 const passing = parseDoctor(fs.readFileSync(path.join(__dirname, "qml", "fixtures", "doctor-pass.json"), "utf8"));

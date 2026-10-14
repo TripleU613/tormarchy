@@ -754,23 +754,22 @@ Panel {
                   font.letterSpacing: 0.8
                 }
 
-                SearchableDropdown {
+                // Dropdown, not SearchableDropdown: the searchable one carries
+                // an editable TextField, created with the panel and alive while
+                // it is hidden, and on Qt 6.10 and older every editable text
+                // field reads the whole clipboard each time it changes, with no
+                // limit on size or time -- anything that copies could stall or
+                // exhaust the shell without anyone pasting. Recent countries
+                // come first, so the list stays short where it counts.
+                Dropdown {
                   id: exitPicker
                   width: topRow.countryWidth
                   rowHeight: topRow.controlHeight
                   showLabel: false
                   foreground: root.foreground
                   fontFamily: root.fontFamily
-                  // Short on purpose. The popup is only as wide as this trigger,
-                  // and the shared component draws these strings without a width
-                  // or elide -- a long one prints straight out of the popup and
-                  // across the panel behind it.
-                  placeholderText: qsTr("Search…")
-                  emptyText: tor.loadingExitCountries ? qsTr("Loading…")
-                    : (tor.torRunning ? qsTr("None found") : qsTr("Not connected"))
-                  options: Model.exitOptions(tor.exitCountries, root.recentExits, tor.excludedExits)
+                  options: Model.exitOptions(tor.exitCountries, root.recentExits, tor.excludedExits, tor.requestedExit)
                   value: tor.requestedExit === "" ? "auto" : tor.requestedExit
-                  triggerLabel: Model.exitLabel(tor.requestedExit, tor.excludedExits)
                   hasCursor: root.cursorActive && root.focusSection === "exit"
                   onChanged: function(value) { root.chooseExit(value) }
                   onHovered: function(isHovered) {

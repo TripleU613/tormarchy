@@ -365,6 +365,15 @@ else bad "the pasted text is used somewhere other than stdin (see above)"; fi
 # the shell process holds the whole bar. Read whole, an endless offer exhausts
 # it before the helper's limit is ever reached (HANCORE-linux, 11214). The read
 # is capped at the helper's own limit; tests/clipboard.js runs it for real.
+# An editable text field is a clipboard reader too: on Qt 6.10 and older it
+# reads the whole clipboard on every change, typing or not, with no limit on
+# size or time (HANCORE-linux, 11472). The panel lives for as long as the shell
+# does, so it creates none; tests/qml/load.py checks the live object tree.
+if grep -nE '^[[:space:]]*(SearchableDropdown|TextField|TextInput|TextEdit|TextArea|NumberField|MultiSelect)[[:space:]]*\{' Panel.qml; then
+  bad "the panel creates an editable text field (above)"
+else
+  ok "the panel creates no editable text field"
+fi
 want "the clipboard is read through the capped read" Service.qml 'clipboardProcess.command = Model.clipboardArgv()'
 reject "and never straight into the shell" Service.qml '["wl-paste"'
 helper_limit=$(sed -n 's/^BRIDGE_INPUT_BYTE_LIMIT=\([0-9]*\)$/\1/p' tormarchy)

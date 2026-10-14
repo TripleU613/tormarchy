@@ -281,10 +281,33 @@ def icon_off_centre():
     return None
 
 
+def editable_text_fields():
+    """Every editable text input the widget has created, popups' contents
+    included. Each one is a reader of the clipboard: on Qt 6.10 and older an
+    editable text input reads the whole clipboard whenever it changes, whether
+    or not anyone is typing, with no limit on size or time."""
+    widget = win.property("widget")
+    if widget is None:
+        return []
+    objects = widget.findChildren(QObject)
+    for o in list(objects):
+        content = o.property("contentItem") if o.inherits("QQuickPopup") else None
+        if content is not None:
+            objects += [content] + content.findChildren(QObject)
+    return sorted({o.metaObject().className() for o in objects
+                   if (o.inherits("QQuickTextInput") or o.inherits("QQuickTextEdit"))
+                   and not o.property("readOnly")})
+
+
 def report():
     global failed
     if not failed and win.property("widget") is None:
         print("FAIL  Panel.qml compiled but did not instantiate")
+        failed = True
+    editable = editable_text_fields() if not failed else []
+    if editable:
+        print("FAIL  the widget holds editable text fields, each of which reads the whole clipboard "
+              "on every change on older Qt: " + ", ".join(editable))
         failed = True
     measured = icon_off_centre() if not failed else None
     if measured is not None:
