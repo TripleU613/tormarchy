@@ -615,11 +615,14 @@ var CLIPBOARD_TIMEOUT_S = 5
 // most ever read, and the read gets a few seconds. Exit 3 is more than the
 // limit, exit 4 a clipboard that would not answer; neither prints any text.
 // Exit 1 from wl-paste is nothing copied, or nothing copied as text, and comes
-// through as an empty paste.
+// through as an empty paste. Command substitution silently drops NUL bytes,
+// which would let a cut-off paste measure as one that fit and splice a line
+// back together before anything validated it, so each NUL becomes \001 first:
+// the same length, and a control character `bridge check` already rejects.
 function clipboardArgv(timeoutS) {
   var script = [
     'export LC_ALL=C',
-    'out=$(timeout -k 1 "$2" wl-paste --no-newline --type text/plain 2>/dev/null | head -c "$(( $1 + 1 ))"',
+    'out=$(timeout -k 1 "$2" wl-paste --no-newline --type text/plain 2>/dev/null | head -c "$(( $1 + 1 ))" | tr "\\000" "\\001"',
     '      printf " %s" "${PIPESTATUS[0]}")',
     'status=${out##* } text=${out% *}',
     '(( ${#text} <= $1 )) || exit 3',
