@@ -60,6 +60,16 @@ check(r.code === 3 && r.out === "", "one byte over is refused, and hands over no
 r = paste("file", "a".repeat(BRIDGE_INPUT_LIMIT) + "\n" + "b".repeat(100));
 check(r.code === 3 && r.out === "", "a newline right at the cut does not make a cut-off paste look whole");
 
+// NUL bytes, which command substitution drops without a word: they must count
+// toward the limit, and must reach the helper as something it rejects rather
+// than vanish and splice a line back together.
+r = paste("file", "a".repeat(BRIDGE_INPUT_LIMIT) + "\0".repeat(10) + "b".repeat(1000));
+check(r.code === 3 && r.out === "", "NUL bytes count toward the limit, so a cut-off paste cannot shrink to fit");
+const spliced = "obfs4 192.0.2.1:443 0123456789ABCDEF0123456789ABCDEF01234567 cert=abc\0def iat-mode=0\n";
+r = paste("file", spliced);
+check(r.code === 0 && r.out.length === spliced.length && r.out.includes("\x01") && !r.out.includes("\0"),
+  "a NUL inside a line arrives as a control character the helper rejects, not as nothing");
+
 r = paste("endless");
 check(r.code === 3 && r.out === "" && r.seconds < 5,
   `a clipboard that never stops is cut off at the limit and refused (${r.seconds}s)`);
