@@ -8,6 +8,12 @@ Item {
 
   property var settings: ({})
 
+  // The shell runs one of these for the plugin and every monitor's widget
+  // shares it. A widget also carries its own, for a bar that will not hand it
+  // the shared one; that copy is not live while the shared one exists, and an
+  // idle copy reads nothing and runs nothing.
+  property bool live: true
+
   // Truth from `tormarchy status --json`.
   property bool installed: false
   property bool torRunning: false
@@ -62,7 +68,12 @@ Item {
   // fixed host at a fixed interval, forever, is a traffic pattern -- a regular
   // beacon with a recognisable shape, which is the last thing a Tor tool should
   // add on the user's behalf without being asked.
-  property bool watching: false
+  //
+  // Counted, because every monitor's panel shares this Service: one closing
+  // must not stop what another is still showing.
+  property int watchers: 0
+  readonly property bool watching: watchers > 0
+  function watch(on) { watchers = Math.max(0, watchers + (on ? 1 : -1)) }
   // Seconds between readings on the live stream. Small numbers are affordable
   // now: each tick is one round trip on a connection that is already open, not
   // a fresh circuit handshake.
@@ -113,7 +124,7 @@ Item {
   // plugin update does not touch it: without setup again, a new plugin talks to
   // an old helper, and every change that lives in the helper never arrives.
   // Compared byte for byte with the one this plugin ships.
-  property string bundledHelper: ""
+  property string bundledHelper: String(Qt.resolvedUrl("tormarchy")).replace(/^file:\/\//, "")
   property bool helperStale: false
   function checkHelper() {
     if (helperCheckProcess.running || bundledHelper === "" || !installed) return
@@ -518,7 +529,7 @@ Item {
     id: refreshTimer
     interval: root.refreshIntervalSec * 1000
     repeat: true
-    running: true
+    running: root.live
     triggeredOnStart: true
     onTriggered: root.refresh()
   }

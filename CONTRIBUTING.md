@@ -16,7 +16,7 @@ skipped otherwise, and it's the part that matters most.
 |---|---|
 | `tormarchy` | Everything that touches the system. One file, all Bash. |
 | `Panel.qml` | The bar icon and the panel. |
-| `Service.qml` | Talks to `tormarchy`, holds the state the panel renders. |
+| `Service.qml` | Talks to `tormarchy`, holds the state the panel renders. The manifest makes it the plugin's service, so the shell runs one for every monitor's widget. |
 | `Model.js` | Parsing and formatting. No Qt in here, so it's testable with `node`. |
 | `TorIcon` / `TorWordmark` / `SpeedGauge` | Drawn in QML, no image files. |
 | `etc/` | What `setup` installs: torrc snippet, polkit policy and rule, tmpfiles. |

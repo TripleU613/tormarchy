@@ -209,7 +209,7 @@ want "live latency streams from pingd" Service.qml "exec tormarchy pingd"
 # Measuring only while the panel is open. A request to a fixed host at a fixed
 # interval forever is a recognisable traffic pattern.
 want "latency streaming is gated on the panel being open" Service.qml "root.watching && root.circuitReady"
-want "the panel sets watching from opened" Panel.qml "tor.watching = opened"
+want "the panel sets watching from opened" Panel.qml "tor.watch(opened)"
 
 # ...and on the connection being on, not merely on the daemon running. Gating the
 # stream on raw torRunning left a live millisecond reading ticking under an OFF

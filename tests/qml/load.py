@@ -42,6 +42,8 @@ ap.add_argument("--doctor", help="JSON to answer `tormarchy doctor --json` with"
 ap.add_argument("--bridges", help="JSON to answer `tormarchy bridge status --json` with")
 ap.add_argument("--bridge-check", help="JSON to answer `tormarchy bridge check` with")
 ap.add_argument("--clipboard", help="file whose contents `wl-paste` returns")
+ap.add_argument("--shared", action="store_true",
+                help="offer the widget its plugin's service the way the built-in bar does, and check it is used")
 ap.add_argument("--expand", choices=["leaks", "bridges"], help="open this tool beneath the tools band")
 ap.add_argument("--call", action="append", default=[],
                 help="after opening, call this function on the panel root, e.g. --call openLeakCheck; "
@@ -87,7 +89,7 @@ else:
     card_border, card_border_width = "#40ffffff", 1
     urgent_color = "#f38ba8"
 
-from PySide6.QtCore import QMetaObject, QObject, QTimer, QUrl, QtMsgType, qInstallMessageHandler  # noqa: E402
+from PySide6.QtCore import Q_ARG, QMetaObject, QObject, QTimer, QUrl, QtMsgType, qInstallMessageHandler  # noqa: E402
 from PySide6.QtGui import QFontDatabase, QGuiApplication  # noqa: E402
 from PySide6.QtQml import QQmlComponent, QQmlEngine  # noqa: E402
 # Imported for its wrappers: without it the window and items come back as bare
@@ -126,6 +128,19 @@ Window {
 
   property var widget: null
   property string error: ""
+
+  // What the built-in bar's facade does on 4.0.4 and later: hands a widget
+  // its own plugin's service, which the shell runs once for every monitor.
+  property var sharedService: null
+  QtObject {
+    id: pluginShell
+    function serviceFor(id) { return id === "tripleu.tor" ? win.sharedService : null }
+  }
+  readonly property bool usesSharedService: !!widget && !!sharedService && widget.tor === sharedService
+  function offerSharedService(service) {
+    sharedService = service
+    api.shell = pluginShell
+  }
 
   // What Bar.qml hands an installed third-party widget as `bar`.
   PluginBarApi {
@@ -201,6 +216,18 @@ if win is None:
     sys.exit(2)
 
 failed = False
+shared = None
+if args.shared:
+    service_component = QQmlComponent(engine, QUrl.fromLocalFile(os.path.join(os.path.abspath(args.plugin), "Service.qml")))
+    shared = service_component.create()
+    if shared is None:
+        print("FAIL  Service.qml does not load as the plugin's service: "
+              + "; ".join(e.toString() for e in service_component.errors()))
+        sys.exit(1)
+    # The shell keeps it in its service registry; here nothing on the QML
+    # side owns it, so the JS collector would take it.
+    QQmlEngine.setObjectOwnership(shared, QQmlEngine.ObjectOwnership.CppOwnership)
+    QMetaObject.invokeMethod(win, "offerSharedService", Q_ARG("QVariant", shared))
 if not win.load(QUrl.fromLocalFile(os.path.join(os.path.abspath(args.plugin), "Panel.qml"))):
     print("FAIL  Panel.qml does not compile. The shell would skip it and nothing would appear in the bar:")
     print("      " + str(win.property("error")).strip().replace("\n", "\n      "))
@@ -233,7 +260,7 @@ def mount_panel():
 
 
 def call_functions(widget):
-    service = find(widget, "Service")
+    service = shared or find(widget, "Service")
     for name in args.call:
         target, method = (service, name[4:]) if name.startswith("tor.") else (widget, name)
         if target is None or not QMetaObject.invokeMethod(target, method):
@@ -304,6 +331,18 @@ def report():
     if not failed and win.property("widget") is None:
         print("FAIL  Panel.qml compiled but did not instantiate")
         failed = True
+    if shared is not None and not failed:
+        reads = [a for a in quickshell_stubs.COMMAND_LOG
+                 if "status --json" in " ".join(a) and "bridge" not in " ".join(a)]
+        if not win.property("usesSharedService"):
+            print("FAIL  the widget was offered its plugin's service and did not use it")
+            failed = True
+        elif len(reads) != 1:
+            print(f"FAIL  {len(reads)} status reads where the shared service alone makes one: "
+                  "the widget's own copy is not idle")
+            failed = True
+        else:
+            print("ok    the widget uses the plugin's shared service and keeps its own copy idle")
     editable = editable_text_fields() if not failed else []
     if editable:
         print("FAIL  the widget holds editable text fields, each of which reads the whole clipboard "

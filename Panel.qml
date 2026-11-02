@@ -494,7 +494,7 @@ Panel {
   // timer, so the plugin never makes a request nobody asked for and nobody
   // would see.
   onOpenedChanged: {
-    tor.watching = opened
+    tor.watch(opened)
     if (!opened) {
       expandedTool = ""
       return
@@ -509,11 +509,27 @@ Panel {
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
+  // The plugin's service, which the shell runs once for every monitor's widget:
+  // one status read, one toast, one control-port session, however many bars.
+  // Omarchy 4.0.4 and later hand it over through the built-in bar. Anything
+  // else -- an older shell, a replacement bar -- gets this widget's own copy,
+  // which is idle whenever the shared one exists.
+  readonly property var sharedTor: bar && bar.shell && typeof bar.shell.serviceFor === "function"
+    ? bar.shell.serviceFor("tripleu.tor") : null
+  readonly property var tor: sharedTor || ownTor
+
   Service {
-    id: tor
-    bundledHelper: root.pluginDir + "/tormarchy"
-    settings: root.settings
+    id: ownTor
+    live: !root.sharedTor
   }
+
+  Binding {
+    target: root.tor
+    property: "settings"
+    value: root.settings
+  }
+
+  Component.onDestruction: if (opened) tor.watch(false)
 
   Connections {
     target: tor

@@ -45,6 +45,10 @@ for omarchy in "${omarchies[@]}"; do
     --expand leaks --call tor.checkLeaks
   load "bridges, one transport missing" --status "$fixtures/on.json" --bridges "$fixtures/bridges-missing.json" \
     --expand bridges --call tor.loadBridgeDetail
+  # Bar only: opening the panel is a status read of its own, and this counts them.
+  echo "== shared service"
+  "$python" tests/qml/load.py --omarchy "$omarchy" --status "$fixtures/on.json" --shared \
+    || failures=$(( failures + 1 ))
   load "bridges, a paste to preview" --status "$fixtures/on.json" --clipboard "$fixtures/bridges.txt" \
     --bridge-check "$fixtures/bridge-check-missing.json" --expand bridges --call tor.pasteBridges
 
