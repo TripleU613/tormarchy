@@ -1193,6 +1193,10 @@ cmd_panic() {
   # Deliberately no lock. The escape hatch must never wait behind anything.
   flush_rules
   ipv6_restore
+  # tor too, without waiting on it. A connect still bootstrapping checks that
+  # tor is running before it applies anything; left running, that connect put
+  # the rules straight back a minute after the escape hatch took them off.
+  systemctl stop --no-block tor.service 2>/dev/null || true
   rm -rf "$STATE_DIR"
   # The escape hatch also cancels the boot reconnect. Someone reaching for panic
   # does not want the machine to put the rules straight back an hour later.
@@ -1208,12 +1212,14 @@ cmd_mode() {
   is_valid_mode "$mode" || die "unknown mode '$mode' (expected: ${VALID_MODES[*]})"
   require_root
 
+  # Before reading what is on, not after: a disconnect landing in between left
+  # this applying a ruleset to a machine whose tor had just been stopped.
+  take_lock
   local was_routed=false browser_on=false
   rules_present && was_routed=true
   [[ $(current_mode) == socks ]] && tor_is_running && browser_on=true
 
   if [[ $mode == socks ]]; then
-    take_lock
     flush_rules
     ipv6_restore
     write_state socks no
@@ -1228,7 +1234,6 @@ cmd_mode() {
   fi
 
   if $was_routed; then
-    take_lock
     apply_rules "$mode" || die "could not apply the $mode ruleset; previous rules left in place"
     ipv6_disable || true
     write_state "$mode" yes
@@ -1239,9 +1244,12 @@ cmd_mode() {
     # rules, which go on through connect so they still wait for a full
     # bootstrap. This used to only record the mode, which turned Tormarchy off
     # from the user's point of view while tor kept running underneath.
+    #
+    # connect takes the lock itself once tor has bootstrapped. Held across that
+    # wait, it would shut out the disconnect that cancels it.
+    exec 9>&-
     cmd_connect "$mode"
   else
-    take_lock
     write_state "$mode" no
     echo "Mode set to $mode. Connect to apply it."
   fi

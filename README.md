@@ -177,7 +177,7 @@ connects and the bridge fallback, or `off` for silence.
 | `tormarchy doctor` | Check for leaks. `--json` for scripts. |
 | `tormarchy boot enable` | Reconnect at boot if Tor was on when you shut down. Off by default. |
 | `tormarchy menu add` | Tor in the Omarchy menu. `setup` does this; `menu remove` takes it out. |
-| `tormarchy panic` | Rip out every rule. For when things go wrong. |
+| `tormarchy panic` | Rip out every rule and stop Tor. For when things go wrong. |
 
 Tab completion for all of it, bash and zsh, installed by `setup`.
 

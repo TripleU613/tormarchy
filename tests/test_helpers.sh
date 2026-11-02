@@ -506,6 +506,33 @@ is "the path is still there for older panels" "$(python3 -c 'import json,sys; pr
 is "excluded exits are listed" "$(python3 -c 'import json,sys; print(",".join(json.loads(sys.argv[1])["excludedExits"]))' "$json" 2>/dev/null)" "us,ru"
 rm -f "$TORRC_EXCLUDE"
 
+echo "Panic and mode"
+
+(
+  require_root() { :; }
+  flush_rules() { :; }
+  ipv6_restore() { :; }
+  forget_connected() { :; }
+  stopped=""
+  systemctl() { [[ $* == "stop --no-block tor.service" ]] && stopped=yes; return 0; }
+  tor_is_running() { [[ -z $stopped ]]; }
+  cmd_panic >/dev/null
+  # What a connect still waiting on tor checks before it applies anything.
+  ( cancelled_unless_running ) 2>/dev/null \
+    && bad "a connect still bootstrapping survives panic and puts the rules back" \
+    || ok "panic cancels a connect still waiting on tor, without waiting itself"
+)
+(
+  require_root() { :; }
+  order=""
+  take_lock() { order+="lock "; }
+  rules_present() { order+="read "; return 1; }
+  current_mode() { printf lan; }
+  write_state() { :; }
+  cmd_mode strict >/dev/null
+  is "mode takes the lock before reading what is on" "$order" "lock read "
+)
+
 echo "Live latency"
 
 # A curl that never runs out of requests: one line in the log per round trip.
