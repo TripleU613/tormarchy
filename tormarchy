@@ -1539,6 +1539,15 @@ bridge_activate() {
   fi
 
   install -d -m 0755 "$TORRC_DIR"
+
+  # Kept until tor has read the new file, to put back if it will not. A dotfile:
+  # tor's %include of the directory skips those.
+  local previous=""
+  if [[ -f $TORRC_BRIDGES ]]; then
+    previous=$(mktemp "$TORRC_DIR/.bridges-was.XXXXXX") || return 1
+    cp -p -- "$TORRC_BRIDGES" "$previous" || { rm -f -- "$previous"; return 1; }
+  fi
+
   {
     echo "# Managed by tormarchy. Edit with 'tormarchy bridge set'."
     echo "UseBridges 1"
@@ -1552,6 +1561,24 @@ bridge_activate() {
   # 0600: which bridges you use is exactly what a bridge is meant to hide, and
   # tor reads its config as root before dropping privileges.
   chmod 0600 "$TORRC_BRIDGES"
+
+  # The shape check passes a truncated fingerprint or a port past 65535, and tor
+  # refuses to start on either: the kill switch then holds a network nothing can
+  # bring back, and every later connect fails too, since its bridge fallback
+  # only runs while no bridges file exists. tor's own parser is the only check
+  # that knows, so it reads the file before anything restarts.
+  local verdict
+  if ! verdict=$(tor --verify-config -f "$TORRC" 2>&1); then
+    if [[ -n $previous ]]; then
+      mv -f -- "$previous" "$TORRC_BRIDGES"
+    else
+      rm -f -- "$TORRC_BRIDGES"
+    fi
+    { grep -m1 -iE '\[(err|warn)\].*(bridge|transport)' <<<"$verdict" \
+        || grep -m1 -E '\[(err|warn)\]' <<<"$verdict"; } | sed 's/^.*\] //' >&2
+    return 1
+  fi
+  [[ -z $previous ]] || rm -f -- "$previous"
 }
 
 bridge_reload() {

@@ -309,6 +309,29 @@ is "it names each transport, plain bridges included" \
   && ok "nothing of the lines themselves comes back" || bad "bridge check echoed a line: $check"
 is "empty input is no bridges, not an error" "$(cmd_bridge check </dev/null)" '{"invalidLines":0,"count":0,"transports":[]}'
 
+(
+  TORRC_DIR="$scratch/torrc.d"
+  TORRC_BRIDGES="$TORRC_DIR/20-tormarchy-bridges.conf"
+  mkdir -p "$TORRC_DIR"
+  transport_binary() { printf '/usr/bin/lyrebird'; }
+  # tor's parser, for the one line it would refuse: a fingerprint cut short.
+  tor() { ! grep -q ' 192.0.2.9:443 ABCD ' "$TORRC_BRIDGES" || { echo "Nov 02 [warn] Bridge line did not parse."; return 1; }; }
+  good="$scratch/good"; bad="$scratch/bad"
+  printf 'obfs4 192.0.2.1:443 AAAA cert=x iat-mode=0\n' >"$good"
+  printf 'obfs4 192.0.2.9:443 ABCD cert=x iat-mode=0\n' >"$bad"
+
+  bridge_activate "$good" 2>/dev/null
+  before=$(cat "$TORRC_BRIDGES")
+  bridge_activate "$bad" 2>/dev/null && bad "a line tor refuses was accepted" || ok "a line tor refuses is refused"
+  is "and the bridges in use are put back as they were" "$(cat "$TORRC_BRIDGES")" "$before"
+  why=$(bridge_activate "$bad" 2>&1 >/dev/null)
+  is "with tor's reason" "$why" "Bridge line did not parse."
+  rm -f "$TORRC_BRIDGES"
+  bridge_activate "$bad" 2>/dev/null
+  [[ ! -e $TORRC_BRIDGES ]] && ok "with none in use before, none are left behind" || bad "a refused config was left for tor to choke on"
+  [[ -z $(find "$TORRC_DIR" -name '.bridges-was.*') ]] && ok "and no copy is left over" || bad "a backup copy was left in torrc.d"
+)
+
 if (( EUID == 0 )); then
   BRIDGE_STASH="$scratch/etc-tormarchy/bridges.stash"
   BRIDGE_SUMMARY="$scratch/etc-tormarchy/bridges.summary"
