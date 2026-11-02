@@ -91,6 +91,10 @@ is "forgetting clears it" "$(remembered_mode)" ""
 rm -f "$BOOT_UNIT"
 remember_connected lan
 is "nothing is recorded while the boot receiver is off" "$(remembered_mode)" ""
+unit=$(boot_unit)
+[[ $unit == *"ExecStart=$BIN_DIR/tormarchy connect"* && $unit == *"ConditionPathExists=$RECONNECT_MARKER"* ]] \
+  && ok "the boot unit runs the installed helper, and only once the marker is armed" \
+  || bad "the boot unit does not match the helper's own paths: $unit"
 
 echo
 echo "Circuit path"

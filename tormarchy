@@ -2261,6 +2261,39 @@ cmd_doctor() {
 
 # ---- boot receiver ----
 
+# The unit `boot enable` installs. Written from here rather than copied from a
+# file beside the script, because the copy setup puts in /usr/local/bin has no
+# files beside it -- which is where the README tells you to run this from.
+#
+# Opt-in for a reason: nothing else here persists across a reboot, since the
+# ruleset is never written to nftables' persistent config, so restarting has always been
+# the guaranteed way out of a wedged firewall. What keeps it safe is that
+# connect applies rules only after tor reports a full bootstrap; with no network
+# at boot, or a tor that cannot start, the machine comes up with ordinary
+# networking. The marker lives in /var/lib, since /run does not survive a boot.
+boot_unit() {
+  cat <<UNIT
+# Managed by tormarchy. Installed by \`tormarchy boot enable\`, removed by disable.
+
+[Unit]
+Description=Reconnect Tormarchy if Tor was on at shutdown
+Documentation=https://github.com/TripleU613/tormarchy
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+ConditionPathExists=$RECONNECT_MARKER
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+ExecStart=$BIN_DIR/tormarchy connect
+TimeoutStartSec=180
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+}
+
 cmd_boot() {
   case "${1:-status}" in
   status)
@@ -2280,12 +2313,7 @@ cmd_boot() {
     ;;
   enable)
     require_terminal_root
-    local repo_dir
-    repo_dir=$(dirname "$SELF")
-    [[ -f $repo_dir/etc/systemd/tormarchy-boot.service ]] \
-      || die "cannot find etc/systemd/tormarchy-boot.service next to $SELF"
-
-    install -m 0644 "$repo_dir/etc/systemd/tormarchy-boot.service" "$BOOT_UNIT"
+    boot_unit >"$BOOT_UNIT" && chmod 0644 "$BOOT_UNIT" || die "could not write $BOOT_UNIT"
     systemctl daemon-reload
     systemctl enable tormarchy-boot.service >/dev/null 2>&1 \
       || die "installed the unit but could not enable it"

@@ -139,9 +139,10 @@ echo "Recovery"
 # Nothing is written to /etc/nftables.conf, so a reboot always restores normal
 # networking. That is the guaranteed way out of a wedged ruleset.
 reject "the ruleset is never persisted" tormarchy "/etc/nftables.conf"
+reject "boot enable needs nothing beside the installed copy" tormarchy "etc/systemd/tormarchy-boot.service"
 
 # The boot receiver is the one exception, and it must stay opt-in.
-want "boot reconnect is gated on a marker" etc/systemd/tormarchy-boot.service "ConditionPathExists"
+want "boot reconnect is gated on a marker" tormarchy 'ConditionPathExists=$RECONNECT_MARKER'
 want "uninstall removes the boot unit" tormarchy 'rm -f "$BOOT_UNIT"'
 
 # Removing the rules comes before removing the tool that knows how to remove
