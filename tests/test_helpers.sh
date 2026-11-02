@@ -479,6 +479,28 @@ is "the path is still there for older panels" "$(python3 -c 'import json,sys; pr
 is "excluded exits are listed" "$(python3 -c 'import json,sys; print(",".join(json.loads(sys.argv[1])["excludedExits"]))' "$json" 2>/dev/null)" "us,ru"
 rm -f "$TORRC_EXCLUDE"
 
+echo "Live latency"
+
+# A curl that never runs out of requests: one line in the log per round trip.
+requests="$scratch/requests"
+curl() {
+  [[ ${1:-} == --help ]] && { echo "--rate"; return; }
+  local i
+  for (( i = 0; i < 50; i++ )); do echo request >>"$requests"; sleep 0.1; done
+}
+tor_is_running() { return 0; }
+( cmd_pingd 1 >/dev/null ) &
+pingd=$!
+sleep 0.5
+kill -TERM "$pingd"
+sleep 0.3
+before=$(wc -l <"$requests")
+sleep 0.5
+is "closing the panel stops the stream's requests at once" "$(wc -l <"$requests")" "$before"
+kill -KILL "$pingd" 2>/dev/null
+wait "$pingd" 2>/dev/null
+unset -f curl tor_is_running
+
 echo
 if (( failures == 0 )); then
   echo "  all helper tests passed"

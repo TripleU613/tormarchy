@@ -1750,10 +1750,15 @@ cmd_pingd() {
   local paced=1
   curl --help all 2>/dev/null | grep -q -- '--rate' || paced=0
 
-  trap 'exit 0' TERM INT
+  # Closing the panel sends TERM, and bash runs a trap only once the foreground
+  # command returns -- here a hundred paced requests, so the stream went on
+  # pinging for minutes after nobody was looking. Every child runs in the
+  # background and is waited on instead, which a trapped signal interrupts at
+  # once, and the trap takes the children down with it.
+  trap 'pkill -P "$BASHPID" 2>/dev/null; exit 0' TERM INT
 
   while :; do
-    tor_is_running || { sleep "$interval"; continue; }
+    tor_is_running || { sleep "$interval" & wait $!; continue; }
 
     if (( paced )); then
       local -a urls=()
@@ -1762,15 +1767,17 @@ cmd_pingd() {
       curl -s -o /dev/null --socks5-hostname "127.0.0.1:$SOCKS_PORT" \
         --rate "$(( 60 / interval ))/m" --max-time 30 --head \
         -w '%{time_starttransfer}\n' "${urls[@]}" 2>/dev/null \
-        | awk '{ if ($1 + 0 > 0) { printf "%d\n", $1 * 1000; fflush() } }'
+        | awk '{ if ($1 + 0 > 0) { printf "%d\n", $1 * 1000; fflush() } }' &
+      wait $!
     else
       curl -s -o /dev/null --socks5-hostname "127.0.0.1:$SOCKS_PORT" \
         --max-time 30 --head -w '%{time_starttransfer}\n' "$target" 2>/dev/null \
-        | awk '{ if ($1 + 0 > 0) { printf "%d\n", $1 * 1000; fflush() } }'
-      sleep "$interval"
+        | awk '{ if ($1 + 0 > 0) { printf "%d\n", $1 * 1000; fflush() } }' &
+      wait $!
+      sleep "$interval" & wait $!
     fi
 
-    sleep 1
+    sleep 1 & wait $!
   done
 }
 
