@@ -526,10 +526,14 @@ Item {
   Timer {
     // While bootstrapping, the percentage is the whole story — poll fast
     // enough that it actually animates instead of jumping 0 -> 100.
+    //
+    // Only while a toggle is catching up or someone is looking. A connect that
+    // stalls leaves tor running short of 100% with nobody waiting on it, and
+    // gating on bootstrapping alone polled once a second until reboot.
     id: bootstrapPoll
     interval: 1000
     repeat: true
-    running: root.bootstrapping || root._desired !== -1
+    running: root._desired !== -1 || (root.bootstrapping && root.watching)
     onTriggered: root.refresh()
   }
 
@@ -699,7 +703,9 @@ Item {
     stderr: StdioCollector { id: cancelStderr; waitForEnd: true }
     onExited: function(exitCode) {
       // Tells the connect's own exit, which can land after this, to stay quiet.
-      root._cancelled = actionProcess.running
+      // Only when the cancel worked: a failed one leaves the connect running,
+      // and its result is still news.
+      root._cancelled = actionProcess.running && exitCode === 0
       if (exitCode !== 0) {
         root._desired = -1
         root.lastError = Model.elide(String(cancelStderr.text || "") || qsTr("Could not cancel the connection"))

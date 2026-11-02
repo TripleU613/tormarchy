@@ -301,6 +301,10 @@ def _proc_run(self):
         text = "7\n" if "-p" in argv else ""
     elif "exit --list" in cmd:
         text = "de\nnl\nus\nse\nch\n"
+    elif "tormarchy connect" in cmd and os.environ.get("TORMARCHY_STUB_CONNECT_HOLD"):
+        return  # still waiting on tor, like a real connect mid-bootstrap
+    elif "tormarchy disconnect" in cmd and os.environ.get("TORMARCHY_STUB_DISCONNECT_EXIT"):
+        code = int(os.environ["TORMARCHY_STUB_DISCONNECT_EXIT"])
     elif "tormarchy connect" in cmd and os.environ.get("TORMARCHY_STUB_CONNECT_EXIT"):
         # A connect that fails the way the real one does: a message on stderr.
         code = int(os.environ["TORMARCHY_STUB_CONNECT_EXIT"])

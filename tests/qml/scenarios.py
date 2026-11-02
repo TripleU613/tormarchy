@@ -102,6 +102,10 @@ def toasts():
     return [argv for argv in stubs.COMMAND_LOG if argv[:1] == ["omarchy-notification-send"]]
 
 
+def ran(fragment):
+    return [a for a in stubs.COMMAND_LOG if fragment in " ".join(a)]
+
+
 def headline(argv):
     # The first argument after the options, as the sender itself parses it.
     i = argv.index("-p") + 1
@@ -188,8 +192,34 @@ check(toasts() == [], "dismissing the password prompt is not a failure worth a t
 svc.deleteLater()
 del os.environ["TORMARCHY_STUB_CONNECT_EXIT"]
 
+os.environ["TORMARCHY_STUB_CONNECT_HOLD"] = "1"
+os.environ["TORMARCHY_STUB_DISCONNECT_EXIT"] = "1"
+svc = service(fixture("off"))
+QMetaObject.invokeMethod(svc, "toggleConnected")
+wait(80)
+QMetaObject.invokeMethod(svc, "toggleConnected")
+wait(80)
+check(svc.property("_cancelled") is False,
+      "a cancel that fails leaves the connect's own result to be reported")
+svc.deleteLater()
+del os.environ["TORMARCHY_STUB_CONNECT_HOLD"]
+del os.environ["TORMARCHY_STUB_DISCONNECT_EXIT"]
+
 print()
 print("Polling")
+
+# Tor up short of 100% with nothing waiting on it: what a stalled connect
+# leaves behind. Watched, the percentage is worth a poll a second; unwatched,
+# only the regular refresh reads it.
+stalled = fixture("off", torRunning=True, bootstrap=40, controlPort=True)
+svc = service(stalled, {"refreshIntervalSec": 300})
+before = len(ran("status --json"))
+wait(2500)
+check(len(ran("status --json")) == before, "a stalled bootstrap nobody is watching is not polled every second")
+svc.setProperty("watching", True)
+wait(2500)
+check(len(ran("status --json")) >= before + 2, "an open panel watches the percentage climb")
+svc.deleteLater()
 
 svc = service(fixture("on"))
 changes = {"path": 0, "hops": 0, "excludedExits": 0}
@@ -232,10 +262,6 @@ print("Bridges")
 
 BRIDGE_LINES = open(os.path.join(FIXTURES, "bridges.txt")).read()
 os.environ["TORMARCHY_STUB_CLIPBOARD"] = os.path.join(FIXTURES, "bridges.txt")
-
-
-def ran(fragment):
-    return [a for a in stubs.COMMAND_LOG if fragment in " ".join(a)]
 
 
 def lines_in_argv():
