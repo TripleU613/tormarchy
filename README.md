@@ -56,6 +56,10 @@ also drop the `tor` package and your group membership.
 | **Standard** | Everything through Tor, but printers, SSH and Syncthing still work. |
 | **Browser only** | Nothing system-wide. Launches a browser that can't reach anything except Tor. |
 
+Standard trusts your local network: anything on it is reached directly. That
+includes a proxy, so a program told to use one on your LAN goes out through it
+as you. On a network you don't control, use Maximum.
+
 Maximum and Standard also switch off IPv6 (loopback excepted, so things on `::1`
 keep working) and refuse to forward traffic, so a VM or container can't route
 around the rules. Disconnecting puts IPv6 back exactly as it was, interface by

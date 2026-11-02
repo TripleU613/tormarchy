@@ -634,6 +634,12 @@ $lan_nat
     # survives someone adding an accept later.
     meta nfproto ipv6 drop
 
+    # DNS over TLS and over QUIC cannot be redirected into Tor's resolver, and in
+    # lan mode one on the local network -- a Pi-hole, a router -- was accepted
+    # below, putting every name looked up on the wire. Dropped, systemd-resolved's
+    # opportunistic mode falls back to port 53, which the nat chain sends to Tor.
+    meta l4proto { tcp, udp } th dport 853 drop
+
 $lan_filter
 
     # Everything else: UDP, QUIC, ICMP, mDNS, NTP, and any connection opened

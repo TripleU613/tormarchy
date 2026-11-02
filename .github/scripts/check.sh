@@ -275,6 +275,16 @@ else
   fail "the DNS redirect must come BEFORE the LAN return, or DNS leaks to the router"
 fi
 
+# DNS over TLS can't be redirected into Tor's resolver, and a Pi-hole on the LAN
+# offering it was accepted by the LAN rule: every name on the wire.
+dot_line=$(grep -n "th dport 853 drop" "$ruleset" | head -1 | cut -d: -f1)
+lan_accept=$(grep -n "ip daddr { 10.0.0.0/8" "$ruleset" | sed -n 2p | cut -d: -f1)
+if [[ -n $dot_line && -n $lan_accept ]] && (( dot_line < lan_accept )); then
+  pass "DNS over TLS is dropped before the LAN exemption"
+else
+  fail "the port 853 drop must come BEFORE the LAN accept, or DNS over TLS leaks to a LAN resolver"
+fi
+
 for mode in strict lan; do
   r="/tmp/ruleset-$mode.nft"
   # Forwarded traffic never passes the output hook, so a bridged VM, container
