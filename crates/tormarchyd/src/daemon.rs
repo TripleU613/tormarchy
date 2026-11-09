@@ -83,6 +83,10 @@ pub struct Daemon {
     tx: Sender<Ev>,
     paths: Paths,
     host: System,
+    /// False under a test root: systemd's tor.service is the machine's, not
+    /// the test world's, and a host running tor would answer for a fake that
+    /// has stopped.
+    ask_systemd: bool,
     helper: String,
     settings: Settings,
     plugin_version: Option<String>,
@@ -153,13 +157,16 @@ impl Daemon {
         // A test seam, honoured here and nowhere else: this process runs as the
         // user, so pointing it at other files reaches nothing that user could
         // not already read. The root helper has no such variable.
-        let paths = match std::env::var_os("TORMARCHY_ROOT") {
+        let test_root = std::env::var_os("TORMARCHY_ROOT");
+        let ask_systemd = test_root.is_none();
+        let paths = match test_root {
             Some(root) => Paths::under(std::path::Path::new(&root)),
             None => Paths::system(),
         };
         Daemon {
             tx,
             host: System::new(paths.clone()),
+            ask_systemd,
             paths,
             helper: std::env::var("TORMARCHY_HELPER").unwrap_or_else(|_| HELPER_PATH.into()),
             settings: Settings::default(),
@@ -424,7 +431,7 @@ impl Daemon {
                 .unwrap_or(true);
             if force || due {
                 self.last_systemctl = Some(Instant::now());
-                self.facts.tor_running = self.host.tor_running();
+                self.facts.tor_running = self.ask_systemd && self.host.tor_running();
             }
             if !self.facts.tor_running {
                 self.facts.bootstrap = 0;
