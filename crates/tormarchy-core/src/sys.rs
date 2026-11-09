@@ -51,6 +51,10 @@ pub struct Run<'a> {
     pub stderr_limit: usize,
     pub env: Vec<(String, String)>,
     pub clear_env: bool,
+    /// Keep the caller's own PATH. Only for programs run as the user that live
+    /// where only the user's PATH reaches -- Omarchy's own commands -- and never
+    /// in anything that runs as root.
+    pub user_path: bool,
 }
 
 impl<'a> Run<'a> {
@@ -68,7 +72,12 @@ impl<'a> Run<'a> {
             stderr_limit: 16 << 10,
             env: Vec::new(),
             clear_env: false,
+            user_path: false,
         }
+    }
+    pub fn user_path(mut self) -> Self {
+        self.user_path = true;
+        self
     }
     pub fn stdin(mut self, data: impl Into<Vec<u8>>) -> Self {
         self.stdin = Some(data.into());
@@ -91,12 +100,21 @@ impl<'a> Run<'a> {
     /// a limit is never retained: the readers stop keeping bytes there, and the
     /// child is killed if stdout overflows, so an endless producer costs nothing.
     pub fn run(self) -> Output {
-        let mut cmd = Command::new(self.program);
+        let program = if self.user_path || self.program.contains('/') {
+            PathBuf::from(self.program)
+        } else {
+            // Found on the fixed PATH, whatever the caller's says.
+            which(self.program)
+                .unwrap_or_else(|| PathBuf::from(format!("/nonexistent/{}", self.program)))
+        };
+        let mut cmd = Command::new(&program);
         cmd.args(&self.args);
         if self.clear_env {
             cmd.env_clear();
         }
-        cmd.env("PATH", FIXED_PATH);
+        if !self.user_path {
+            cmd.env("PATH", FIXED_PATH);
+        }
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
