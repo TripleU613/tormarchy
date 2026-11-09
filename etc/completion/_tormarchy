@@ -17,6 +17,7 @@ _tormarchy() {
     'pingd:Stream live latency'
     'doctor:Leak checks'
     'panic:Remove every rule'
+    'version:Which release is installed'
     'boot:Reconnect at boot'
     'menu:Tor in the Omarchy menu'
     'setup:Install the system side'

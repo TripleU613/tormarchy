@@ -9,44 +9,63 @@
 
 ---
 
-Needs Omarchy 4.x. Everything else it uses is already on an Arch box —
-`nftables`, `systemd`, `polkit`, `curl`, `iproute2`. `setup` installs `tor`
-itself. Bridges additionally want `obfs4proxy` (AUR) or `meek`, and it'll tell
-you which if you need them.
+Needs Omarchy 4.x on x86_64. Everything else it uses is already on an Arch box —
+`nftables`, `systemd`, `polkit`, `curl`, `iproute2`. `setup` installs `tor`, and
+`cosign` to verify the release with. Bridges additionally want `obfs4proxy`
+(AUR) or `meek`, and it'll tell you which if you need them.
 
 ## Install
 
 ```bash
 omarchy plugin add https://github.com/TripleU613/tormarchy.git --enable
-sudo ~/.config/omarchy/plugins/tripleu.tor/tormarchy setup
+sudo ~/.config/omarchy/plugins/tripleu.tor/setup
 ```
 
-`setup` needs a terminal and tells you everything it touches as it goes. For the
-record, that's: `tor` installed, `tormarchy` copied to `/usr/local/bin`, a config
-snippet in `/etc/tor/torrc.d/`, one line added to `/etc/tor/torrc`, a polkit rule
-so the toggle doesn't ask for a password, your user added to the `tor` group,
+`setup` fetches the release for the version of the plugin you have, and checks
+its signature before anything runs as root: it has to have been signed by this
+repository's own release workflow, on `master`, at exactly the commit that
+version's tag names on GitHub. That's [Sigstore](https://www.sigstore.dev/)
+keyless signing, so there is no key in this repository to trust or to steal.
+If it doesn't verify, nothing is installed.
+
+Then the release's own `setup` takes over. It needs a terminal and tells you
+everything it touches as it goes. For the record, that's: `tor` installed,
+`tormarchy` and `tormarchyd` copied to `/usr/local/bin`, a config snippet in
+`/etc/tor/torrc.d/`, one line added to `/etc/tor/torrc`, a polkit rule so the
+toggle doesn't ask for a password, your user added to the `tor` group,
 `/var/lib/tor` loosened to `0750` so it can read Tor's control cookie, and Tor
-added to the Omarchy menu. It doesn't touch your Firefox or browser profiles —
-browser mode makes its own.
+added to the Omarchy menu. Every one of those files is inside the verified
+binary; nothing is read from the plugin's own folder. It doesn't touch your
+Firefox or browser profiles — browser mode makes its own.
 
 The polkit rule covers only the commands that change routing — connect,
 disconnect, mode, exit, bridge, panic and the browser lock — each pinned by name.
 Anything else asks for your password, and nothing it covers runs a program you
 name.
 
-Run `setup` again after updating the plugin: the helper it installs is a copy,
-and only `setup` refreshes it. The panel shows **Update helper** when it's due.
+Run `setup` again after updating the plugin: the helper is only replaced by
+`setup`. The panel shows **Update helper** when it's due.
+
+## How it's built
+
+Two small Rust programs and a little QML.
+
+| | |
+|---|---|
+| `tormarchy` | The command line, and the only thing that runs as root — briefly, through polkit or `sudo`, for the commands listed above. |
+| `tormarchyd` | Runs as you, started by the shell for the panel. It holds one connection to Tor's control port and is *told* when something changes — a bootstrap step, a new circuit — instead of asking every few seconds. It decides everything the panel shows. |
+| The QML | Draws what `tormarchyd` says and sends back what you click. |
 
 ## Removing it
 
 ```bash
-sudo ~/.config/omarchy/plugins/tripleu.tor/tormarchy uninstall
+sudo tormarchy uninstall
 omarchy plugin remove tripleu.tor
 ```
 
 `uninstall` puts all of the above back, including `/var/lib/tor` and the menu,
-and takes the firewall rules down first so you can't end up without a network. Add `--purge` to
-also drop the `tor` package and your group membership.
+and takes the firewall rules down first so you can't end up without a network.
+Add `--purge` to also drop the `tor` package and your group membership.
 
 ## Modes
 
@@ -182,6 +201,7 @@ connects and the bridge fallback, or `off` for silence.
 | `tormarchy boot enable` | Reconnect at boot if Tor was on when you shut down. Off by default. |
 | `tormarchy menu add` | Tor in the Omarchy menu. `setup` does this; `menu remove` takes it out. |
 | `tormarchy panic` | Rip out every rule and stop Tor. For when things go wrong. |
+| `tormarchy version` | Which release is installed. |
 
 Tab completion for all of it, bash and zsh, installed by `setup`.
 

@@ -17,12 +17,29 @@
 
 set -euo pipefail
 
+# The manifest, the binaries and the lockfile carry one version: setup fetches
+# the release by the manifest's, and refuses a binary that says otherwise.
+set_version() {
+  python3 - "$1" <<'PY'
+import json, pathlib, re, sys
+v = sys.argv[1]
+p = pathlib.Path("manifest.json")
+m = json.loads(p.read_text())
+m["version"] = v
+p.write_text(json.dumps(m, indent=2, ensure_ascii=False) + "\n")
+c = pathlib.Path("Cargo.toml")
+c.write_text(re.sub(r'(\[workspace\.package\]\nversion = ")[^"]*(")', r"\g<1>" + v + r"\g<2>", c.read_text(), count=1))
+PY
+  cargo update --workspace --offline --quiet 2>/dev/null || cargo generate-lockfile --offline --quiet 2>/dev/null || true
+  git add manifest.json Cargo.toml Cargo.lock
+}
+
 staged=$(git diff --cached --name-only)
 [[ -n $staged ]] || exit 0
 
 # A commit that only edits the manifest is either a deliberate version choice or
 # this hook's own work. Either way, leave it alone.
-if [[ $(printf '%s\n' "$staged" | grep -vc '^manifest\.json$') -eq 0 ]]; then
+if [[ $(printf '%s\n' "$staged" | grep -vcE '^(manifest\.json|Cargo\.toml|Cargo\.lock)$') -eq 0 ]]; then
   exit 0
 fi
 
@@ -46,7 +63,8 @@ committed_version=$(git show HEAD:manifest.json 2>/dev/null \
   | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])' 2>/dev/null || echo "")
 
 if [[ -n $committed_version && $staged_version != "$committed_version" ]]; then
-  echo "pre-commit: version set to $staged_version by hand, leaving it alone"
+  echo "pre-commit: version set to $staged_version by hand; carrying it to the binaries"
+  set_version "$staged_version"
   exit 0
 fi
 
@@ -57,13 +75,5 @@ print(f"{major}.{minor}.{int(patch) + 1}")
 PY
 )
 
-python3 - "$next" <<'PY'
-import json, pathlib, sys
-p = pathlib.Path("manifest.json")
-m = json.loads(p.read_text())
-m["version"] = sys.argv[1]
-p.write_text(json.dumps(m, indent=2) + "\n")
-PY
-
-git add manifest.json
+set_version "$next"
 echo "pre-commit: version $current -> $next (pushing this releases v$next)"
