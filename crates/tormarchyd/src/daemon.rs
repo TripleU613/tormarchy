@@ -584,18 +584,21 @@ impl Daemon {
                     self.plugin_version = plugin_version(&PathBuf::from(dir));
                 }
             }
-            "watch" => {
-                if v.get("on").and_then(Value::as_bool).unwrap_or(false) {
-                    self.watchers += 1;
+            // How many panels are open right now, as a number rather than one
+            // more or one fewer: a daemon started again while two panels are
+            // open is told two, not one, so closing either does not stop what
+            // the other still shows.
+            "watchers" => {
+                let count = v.get("count").and_then(Value::as_u64).unwrap_or(0).min(64) as u32;
+                let was = self.watching();
+                self.watchers = count;
+                if self.watching() && !was {
                     self.refresh(true);
                     if !self.exits_loaded {
                         self.load_exits();
                     }
-                } else {
-                    self.watchers = self.watchers.saturating_sub(1);
-                    if !self.watching() {
-                        self.cancel_bridges();
-                    }
+                } else if !self.watching() && was {
+                    self.cancel_bridges();
                 }
             }
             "refresh" => self.refresh(true),

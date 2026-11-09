@@ -66,6 +66,9 @@ fn main() -> ExitCode {
         libc::umask(0o077);
     }
     // Every external program is found on a fixed PATH, never the caller's.
+    // The caller's own is kept for one thing only: finding the browser an
+    // unprivileged `browser` launches, which may live in ~/.local/bin.
+    sys::remember_user_path();
     std::env::set_var("PATH", sys::FIXED_PATH);
 
     let args: Vec<String> = std::env::args().skip(1).collect();

@@ -43,7 +43,7 @@ Item {
   property int watchers: 0
   function watch(on) {
     watchers = Math.max(0, watchers + (on ? 1 : -1))
-    send({ cmd: "watch", on: !!on })
+    send({ cmd: "watchers", count: watchers })
     // Opening the panel is also when a helper installed since is noticed.
     if (on && live && !daemon.running) restart.restart()
   }
@@ -105,7 +105,8 @@ Item {
       root.started = true
       root.backoffMs = 2000
       root.send({ cmd: "hello", settings: root.settings, pluginDir: root.pluginDir })
-      if (root.watchers > 0) root.send({ cmd: "watch", on: true })
+      // The whole count, so a restart does not forget a panel still open.
+      root.send({ cmd: "watchers", count: root.watchers })
     }
 
     // Quickshell reports a program it cannot find without an exit, only

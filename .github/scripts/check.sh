@@ -21,6 +21,18 @@ group() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 group "Rust"
 
+# Under sudo -- for the kernel checks below -- cargo still runs as the person
+# who ran sudo. Run as root it leaves target/ and the registry cache owned by
+# root, and the next unprivileged build fails on them: the release job builds
+# straight after this script.
+cargo() {
+  if (( EUID == 0 )) && [[ -n ${SUDO_USER:-} && $SUDO_USER != root ]]; then
+    runuser -u "$SUDO_USER" -- env PATH="$PATH" HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)" cargo "$@"
+  else
+    command cargo "$@"
+  fi
+}
+
 if ! command -v cargo >/dev/null 2>&1; then
   fail "cargo is not installed: the helper and the daemon cannot be built or tested"
 else

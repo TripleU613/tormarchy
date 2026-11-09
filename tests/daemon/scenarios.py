@@ -388,7 +388,7 @@ w = World()
 w.until(lambda v: v["installed"])
 # A transport this machine cannot run is shown, and cannot be applied.
 w.knob("clipboard", "webtunnel [2001:db8::1]:443 CCCC url=https://example.com/x\n")
-w.send({"cmd": "watch", "on": True})
+w.send({"cmd": "watchers", "count": 1})
 w.send({"cmd": "pasteBridges"})
 check(w.until(lambda v: v["bridges"]["hasPreview"] and not v["bridges"]["canApply"]), "bridges needing a missing transport cannot be applied")
 check(w.view["bridges"]["chips"] and not w.view["bridges"]["chips"][0]["available"]
@@ -401,7 +401,7 @@ check(w.until(lambda v: not v["bridges"]["hasPreview"]), "Cancel drops the previ
 # Plain bridges need no transport, so any machine can apply them.
 lines = "192.0.2.1:443 AAAA\nBridge 192.0.2.2:443 BBBB\n"
 w.knob("clipboard", lines)
-w.send({"cmd": "watch", "on": True})
+w.send({"cmd": "watchers", "count": 1})
 w.send({"cmd": "pasteBridges"})
 check(w.until(lambda v: v["bridges"]["hasPreview"]), "a paste is previewed before anything changes")
 v = w.view["bridges"]
@@ -429,11 +429,17 @@ w.send({"cmd": "pasteBridges"})
 check(w.until(lambda v: "Could not read the clipboard" in v["bridges"]["message"]["full"]), "a clipboard that fails says so")
 w.knob("clipboard-exit")
 w.knob("clipboard", "obfs4 192.0.2.1:443 AAAA cert=x\n")
-w.send({"cmd": "watch", "on": True})
+w.send({"cmd": "watchers", "count": 1})
 w.send({"cmd": "pasteBridges"})
 w.until(lambda v: v["bridges"]["hasPreview"])
-w.send({"cmd": "watch", "on": False})
+w.send({"cmd": "watchers", "count": 0})
 check(w.until(lambda v: not v["bridges"]["hasPreview"]), "closing the panel drops a pending paste")
+w.send({"cmd": "watchers", "count": 2})
+w.send({"cmd": "pasteBridges"})
+w.until(lambda v: v["bridges"]["hasPreview"])
+w.send({"cmd": "watchers", "count": 1})
+time.sleep(0.5)
+check(w.view["bridges"]["hasPreview"], "with two panels open, closing one keeps the other's paste")
 w.close()
 
 print("New circuit")

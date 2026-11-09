@@ -257,6 +257,17 @@ pub fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// The PATH this process was started with, kept before the helper replaces
+/// its own with [`FIXED_PATH`], for [`which_user`] alone.
+static USER_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Remembers the caller's PATH. Call before replacing it.
+pub fn remember_user_path() {
+    if let Ok(p) = std::env::var("PATH") {
+        let _ = USER_PATH.set(p);
+    }
+}
+
 /// Like [`which`], over the caller's own PATH: for programs the user names,
 /// such as a browser, which run as that user and never as root.
 pub fn which_user(name: &str) -> Option<PathBuf> {
@@ -264,7 +275,11 @@ pub fn which_user(name: &str) -> Option<PathBuf> {
         let p = PathBuf::from(name);
         return is_executable(&p).then_some(p);
     }
-    let path = std::env::var("PATH").unwrap_or_else(|_| FIXED_PATH.into());
+    let path = USER_PATH
+        .get()
+        .cloned()
+        .or_else(|| std::env::var("PATH").ok())
+        .unwrap_or_else(|| FIXED_PATH.into());
     path.split(':')
         .filter(|d| !d.is_empty())
         .map(|d| Path::new(d).join(name))

@@ -65,10 +65,9 @@ fn default_browser() -> Option<String> {
             .next()
             .map(str::to_string)
     };
-    if sys::which_user("omarchy-default-browser").is_some() {
-        if let Some(b) =
-            first_word(sys::Run::new("omarchy-default-browser", Vec::<String>::new()).run())
-        {
+    if let Some(helper) = sys::which_user("omarchy-default-browser") {
+        let helper = helper.display().to_string();
+        if let Some(b) = first_word(sys::Run::new(&helper, Vec::<String>::new()).run()) {
             if sys::which_user(&b).is_some() {
                 return Some(b);
             }
@@ -161,6 +160,12 @@ pub fn launch(args: &[String]) -> Res {
         .ok_or("HOME is not set")?
         .join("tormarchy");
     let name = chosen.rsplit('/').next().unwrap_or(&chosen).to_string();
+    // By its full path: what runs inside the scope finds programs on this
+    // helper's fixed PATH, which a browser in ~/.local/bin is not on.
+    let exe = sys::which_user(&chosen)
+        .ok_or_else(|| Fail(format!("no such browser on PATH: {chosen}")))?
+        .display()
+        .to_string();
     let mkdir = |d: &Path| {
         fs::create_dir_all(d).map_err(|e| Fail(format!("could not create {}: {e}", d.display())))
     };
@@ -169,7 +174,7 @@ pub fn launch(args: &[String]) -> Res {
             let dir = data.join("firefox");
             firefox_profile(&dir)?;
             vec![
-                chosen.clone(),
+                exe.clone(),
                 "--profile".into(),
                 dir.display().to_string(),
                 "--new-instance".into(),
@@ -181,7 +186,7 @@ pub fn launch(args: &[String]) -> Res {
             // host-resolver-rules stops Chromium resolving names itself;
             // without it DNS leaves in clear beside a proxied page.
             vec![
-                chosen.clone(),
+                exe.clone(),
                 format!("--user-data-dir={}", dir.display()),
                 format!("--proxy-server=socks5://127.0.0.1:{SOCKS_PORT}"),
                 "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1".into(),
@@ -192,7 +197,7 @@ pub fn launch(args: &[String]) -> Res {
             let dir = data.join("qutebrowser");
             mkdir(&dir)?;
             vec![
-                chosen.clone(),
+                exe.clone(),
                 "--basedir".into(),
                 dir.display().to_string(),
                 "-s".into(),
@@ -214,7 +219,7 @@ pub fn launch(args: &[String]) -> Res {
                     "{name} is already running. Close it first: a new window would open in that unproxied instance instead of a locked-down one."
                 )));
             }
-            vec![chosen.clone()]
+            vec![exe.clone()]
         }
     };
     cmd.extend(extra.iter().cloned());
@@ -317,5 +322,33 @@ mod tests {
         assert_eq!(family_of("brave"), "chromium");
         assert_eq!(family_of("qutebrowser"), "qutebrowser");
         assert_eq!(family_of("something-else"), "generic");
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn a_browser_on_the_callers_own_path_is_found_by_full_path() {
+        let dir = sys::create_temp_dir("tm-browser-").unwrap();
+        let fake = dir.join("tormarchy-test-browser");
+        std::fs::write(&fake, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        // As main does: the caller's PATH remembered, then replaced.
+        std::env::set_var("PATH", format!("{}:{}", dir.display(), sys::FIXED_PATH));
+        sys::remember_user_path();
+        std::env::set_var("PATH", sys::FIXED_PATH);
+        assert_eq!(
+            sys::which_user("tormarchy-test-browser"),
+            Some(fake.clone())
+        );
+        assert_eq!(
+            sys::which("tormarchy-test-browser"),
+            None,
+            "root's lookups never see it"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

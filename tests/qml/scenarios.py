@@ -30,7 +30,7 @@ if not os.path.isdir(os.path.join(shell_dir, "Ui")):
     sys.exit(f"no Omarchy shell at {shell_dir} -- pass --omarchy <checkout>")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEventLoop, QMetaObject, Q_ARG, QTimer, QUrl  # noqa: E402
+from PySide6.QtCore import QEventLoop, QMetaObject, QObject, Q_ARG, QTimer, QUrl  # noqa: E402
 from PySide6.QtGui import QGuiApplication  # noqa: E402
 from PySide6.QtQml import QQmlComponent, QQmlEngine  # noqa: E402
 from PySide6 import QtQuick  # noqa: E402,F401
@@ -119,11 +119,12 @@ call(svc, "watch", True)
 call(svc, "watch", True)
 call(svc, "watch", False)
 cmds = sent()
-check([c["cmd"] for c in cmds] == ["toggle", "setMode", "setExit", "setBridges", "watch", "watch", "watch"],
+check([c["cmd"] for c in cmds] == ["toggle", "setMode", "setExit", "setBridges", "watchers", "watchers", "watchers"],
       "every click is a command, in order")
 check(cmds[1].get("mode") == "strict" and cmds[2].get("cc") == "de" and cmds[3].get("on") is True,
       "carrying its argument")
-check(svc.property("watchers") == 1, "two panels open and one closed is one still watching")
+check(svc.property("watchers") == 1 and [c.get("count") for c in cmds[4:]] == [1, 2, 1],
+      "two panels open and one closed is one still watching, sent as the whole count")
 svc.setProperty("settings", {"mode": "strict"})
 check(sent()[-1] == {"cmd": "settings", "settings": {"mode": "strict"}}, "a settings change is passed on")
 svc.deleteLater()
@@ -137,6 +138,19 @@ wait(2300)
 check(len(spawns()) == 2, "and again a little later, in case setup has run since")
 wait(2300)
 check(len(spawns()) == 2, "backing off each time, so a missing helper is not a loop")
+svc.deleteLater()
+
+print("A restart")
+svc = service("view-on")
+call(svc, "watch", True)
+call(svc, "watch", True)
+stubs.STDIN_LOG.clear()
+# The daemon exits, the way it does when it crashes: the service starts it again.
+daemon = [o for o in svc.findChildren(QObject) if o.metaObject().className().startswith("Process")][0]
+daemon.setProperty("running", False)
+wait(2400)
+counts = [c.get("count") for c in sent() if c.get("cmd") == "watchers"]
+check(counts == [2], "a restarted daemon is told every panel still open, not just one")
 svc.deleteLater()
 
 print("An idle copy")
