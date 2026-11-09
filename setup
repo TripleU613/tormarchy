@@ -4,6 +4,9 @@
 #
 #   sudo ~/.config/omarchy/plugins/tripleu.tor/setup
 #
+# The panel's Set up button runs it through pkexec instead, so the password is
+# asked in Omarchy's own dialog rather than a terminal.
+#
 # The only script left in this plugin, and deliberately small: everything else
 # is the tormarchy and tormarchyd binaries. It fetches the release built for the
 # version this plugin declares, verifies it, and hands over to that binary's own
@@ -29,8 +32,20 @@ HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 
 die() { echo "setup: $*" >&2; exit 1; }
 
-(( EUID == 0 )) || die "run this with sudo: sudo $HERE/setup"
-[[ -z ${PKEXEC_UID:-} ]] || die "run this from a terminal with sudo, not through polkit"
+(( EUID == 0 )) || die "run this with sudo: sudo $HERE/setup, or from the panel"
+# Through pkexec, polkit can only have used its default exec action, which
+# always asks for an administrator's password: the passwordless rule setup
+# installs covers com.tormarchy.* alone, and no action of ours names this file.
+# So this is sudo with a different dialog. The binary refuses pkexec outright --
+# its own runtime commands are the ones that grant reaches -- and only knows
+# sudo's way of saying who ran it, so it is told that way.
+if [[ -n ${PKEXEC_UID:-} ]]; then
+  [[ $PKEXEC_UID =~ ^[0-9]+$ ]] || die "pkexec named no user"
+  SUDO_USER=$(getent passwd "$PKEXEC_UID" | cut -d: -f1)
+  [[ -n $SUDO_USER && $SUDO_USER != root ]] || die "could not tell who ran pkexec"
+  export SUDO_USER
+  unset PKEXEC_UID
+fi
 
 version=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p' "$HERE/manifest.json" | head -1)
 [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "could not read the plugin's version from manifest.json"

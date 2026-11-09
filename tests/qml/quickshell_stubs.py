@@ -15,6 +15,7 @@ behaves as Quickshell does for a program that is not installed -- running falls
 back to false, with neither a start nor an exit. Anything else run is logged in
 COMMAND_LOG and exits 0.
 """
+import json
 import os
 
 from PySide6.QtCore import QObject, Property, Signal, Slot, ClassInfo, QEnum, QTimer
@@ -254,6 +255,25 @@ def _proc_start(self):
         if out is not None and hasattr(out, "read"):
             out.read.emit(" ".join(view.split()))
         return  # keeps running, like the real daemon
+    if argv and argv[0] == "pkexec":
+        # Plays setup run through pkexec: TORMARCHY_STUB_SETUP is JSON,
+        # {"code": n, "out": [lines], "err": [lines]}, or unset for pkexec not
+        # being there at all.
+        spec = os.environ.get("TORMARCHY_STUB_SETUP")
+        if spec is None:
+            self._running = False
+            self.runningChanged.emit()
+            return
+        spec = json.loads(spec)
+        code, out_lines, err_lines = spec.get("code", 0), spec.get("out", []), spec.get("err", [])
+        self.started.emit()
+        for stream, lines in (("_stdout", out_lines), ("_stderr", err_lines)):
+            parser = getattr(self, stream, None)
+            for line in lines:
+                if parser is not None and hasattr(parser, "read"):
+                    parser.read.emit(line)
+        _proc_finish(self, int(code))
+        return
     self.started.emit()
     _proc_finish(self, 0)
 

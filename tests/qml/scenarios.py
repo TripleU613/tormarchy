@@ -161,6 +161,64 @@ wait(80)
 check(len(spawns()) == 1 and svc.property("installed") is True, "and starts the moment it is the only one")
 svc.deleteLater()
 
+print("Setup from the panel")
+from PySide6.QtCore import SIGNAL  # noqa: E402
+
+
+def run_setup(spec, installs=None):
+    if spec is None:
+        os.environ.pop("TORMARCHY_STUB_SETUP", None)
+    else:
+        os.environ["TORMARCHY_STUB_SETUP"] = json.dumps(spec)
+    svc = service(None, {"notifications": "problems"})
+    if installs:
+        # What setup leaves behind: a daemon there to start.
+        os.environ["TORMARCHY_STUB_VIEW"] = os.path.join(FIXTURES, installs + ".json")
+    asked = []
+    QObject.connect(svc, SIGNAL("setupNeedsTerminal()"), lambda: asked.append(True))
+    stubs.COMMAND_LOG.clear()
+    call(svc, "runSetup")
+    wait(400)
+    return svc, asked
+
+
+def notes():
+    return [a for a in stubs.COMMAND_LOG if a and a[0] == "omarchy-notification-send"]
+
+
+svc, asked = run_setup({"code": 0, "out": ["Fetching Tormarchy 2.0.0", "Installing tor"]}, installs="view-off")
+pk = [a for a in stubs.COMMAND_LOG if a and a[0] == "pkexec"]
+check(pk == [["pkexec", os.path.join(os.path.abspath(args.plugin), "setup")]],
+      "it runs the plugin's own setup through pkexec, so Omarchy's dialog asks the password")
+check(any("Tor is set up" in a for a in notes()) and notes()[0][-3:] == ["omarchy-shell", "tripleu.tor", "open"],
+      "success is a notification that opens the panel")
+check(len(spawns()) == 1 and svc.property("installed") is True,
+      "and the daemon starts at once, now that there is one, so the panel is ready")
+check(svc.property("settingUp") is False and svc.property("setupError") == "", "with nothing left showing")
+svc.deleteLater()
+
+svc, asked = run_setup({"code": 126})
+check(notes() == [] and svc.property("setupError") == "" and not asked,
+      "a dismissed password dialog is not an error, and says nothing")
+svc.deleteLater()
+
+svc, asked = run_setup({"code": 1, "out": ["Fetching Tormarchy 2.0.0"],
+                        "err": ["setup: the release did not verify; nothing was installed"]})
+check(svc.property("setupError") == "the release did not verify; nothing was installed",
+      "a failure keeps setup's own last word, to show under the button")
+check(any("Tor setup failed" in a for a in notes()), "and says so in a notification")
+svc.deleteLater()
+
+svc, asked = run_setup({"code": 127, "err": ["Error executing command as another user: No authentication agent found."]})
+check(asked == [True] and svc.property("setupError") == "",
+      "with no polkit agent to ask, the panel is sent to a terminal instead")
+svc.deleteLater()
+
+svc, asked = run_setup(None)
+check(asked == [True] and svc.property("settingUp") is False, "and the same with no pkexec at all")
+svc.deleteLater()
+os.environ.pop("TORMARCHY_STUB_SETUP", None)
+
 shutil.rmtree(imports, ignore_errors=True)
 print()
 print("  the service wiring holds" if failures == 0 else f"  {failures} check(s) failed")

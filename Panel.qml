@@ -74,8 +74,8 @@ Panel {
 
   // Tooltips the panel shows before the daemon can speak, wrapped by hand to
   // what a bubble holds: the shell's tooltip draws one line however long.
-  readonly property string setupTip: "Once, in a terminal with sudo: installs tor\nand the helper. After that the switch never\nasks for a password."
-  readonly property string updateTip: "This plugin was updated, but the helper it\nruns was not. Updating runs setup again,\nonce, in a terminal."
+  readonly property string setupTip: "Once: asks for your password, then installs\ntor and the helper. After that the switch\nnever asks for a password."
+  readonly property string updateTip: "This plugin was updated, but the helper it\nruns was not. Updating runs setup again,\nwhich asks for your password once."
   readonly property string leakTip: "Asks check.torproject.org whether you are\ncoming from Tor, tries an IPv6 host directly,\nand checks DNS, forwarding and the clock. Runs\nonly when you ask, and takes up to half a\nminute."
   readonly property string bridgesTip: "For networks that block Tor. Paste bridge\nlines from the clipboard to use them."
   readonly property string bridgesHelpTip: "Get bridges at bridges.torproject.org or from\n@GetBridgesBot on Telegram. Copy the lines,\nthen paste them here."
@@ -194,6 +194,23 @@ Panel {
       text: info.tip
       fontFamily: root.fontFamily
     }
+  }
+
+  // What setup is doing while it runs, or why it stopped.
+  component SetupProgress: Column {
+    width: parent ? parent.width : implicitWidth
+    spacing: Style.space(4)
+    Text {
+      visible: tor.settingUp && tor.setupStatus !== ""
+      width: parent.width
+      elide: Text.ElideRight
+      textFormat: Text.PlainText
+      text: tor.setupStatus
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+    Brief { full: tor.settingUp ? "" : tor.setupError }
   }
 
   // A message as one short line, with the whole of it in the bubble. The
@@ -349,7 +366,7 @@ Panel {
 
   function activateCursor() {
     ensureCursor()
-    if (focusSection === "setup") runSetup()
+    if (focusSection === "setup" && !tor.settingUp) runSetup()
     else if (focusSection === "header") tor.toggle()
     else if (focusSection === "newnym") tor.newCircuit()
     else if (focusSection === "exit") exitPicker.toggle()
@@ -406,10 +423,16 @@ Panel {
     exitPicker.open()
   }
 
-  // Setup is the one interactive step (pacman, polkit, a group change), so it
-  // gets a real terminal, never a silent pkexec: it refuses to run through
-  // polkit at all.
+  // Setup asks for the password in Omarchy's own dialog and reports back in a
+  // notification. The panel closes first so nothing of ours stands between the
+  // dialog and the keyboard.
   function runSetup() {
+    close()
+    tor.runSetup()
+  }
+
+  // Where there is no polkit agent to show that dialog: a terminal and sudo.
+  function runSetupInTerminal() {
     if (!bar) return
     close()
     bar.run("omarchy-launch-floating-terminal-with-presentation "
@@ -455,6 +478,7 @@ Panel {
   Connections {
     target: tor
     function onInstalledChanged() { root.ensureCursor() }
+    function onSetupNeedsTerminal() { root.runSetupInTerminal() }
     function onViewChanged() { if (root.opened) root.ensureCursor() }
   }
 
@@ -687,14 +711,16 @@ Panel {
 
             Button {
               visible: root.v.helperStale
-              text: "Update helper"
+              text: tor.settingUp ? "Updating helper..." : "Update helper"
               bordered: true
               focusable: false
               foreground: root.foreground
               fontFamily: root.fontFamily
               tooltipText: root.updateTip
-              onClicked: root.runSetup()
+              onClicked: if (!tor.settingUp) root.runSetup()
             }
+
+            SetupProgress { visible: root.v.helperStale || tor.setupError !== "" }
 
             // Band 2: the latency card, and New circuit beside it.
             Row {
@@ -1086,7 +1112,8 @@ Panel {
 
             Button {
               width: parent.width
-              text: "Run setup"
+              text: tor.settingUp ? "Setting up..." : "Set up"
+              iconSpinning: tor.settingUp
               tooltipText: root.setupTip
               bordered: true
               focusable: false
@@ -1094,11 +1121,13 @@ Panel {
               foreground: root.foreground
               fontFamily: root.fontFamily
               verticalPadding: Style.space(12)
-              onClicked: root.runSetup()
+              onClicked: if (!tor.settingUp) root.runSetup()
               onHovered: function(isHovered) {
                 if (isHovered) { root.cursorActive = true; root.focusSection = "setup" }
               }
             }
+
+            SetupProgress {}
           }
 
           PanelSeparator {
