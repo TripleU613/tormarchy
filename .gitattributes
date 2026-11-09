@@ -1,0 +1,3 @@
+# Keep the language bar about the app: tests and CI scripts are not counted.
+tests/** linguist-vendored
+.github/** linguist-vendored
