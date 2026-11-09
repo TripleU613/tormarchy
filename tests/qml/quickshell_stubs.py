@@ -8,12 +8,12 @@ and a compile error is exactly what load.py is there to find. When Omarchy's
 components start using something new, load.py reports it as a host error and
 the property goes here.
 
-Process is the one stand-in with behaviour. It answers `tormarchy status --json`,
-`doctor --json`, `bridge status --json`, `bridge check` and `wl-paste` from the
-fixture files named by the TORMARCHY_STUB_* variables, streams a fixed latency
-for `pingd`, and exits 0 for anything else. A process with stdin enabled waits
-for stdin to be closed before it "runs", as one reading to EOF would. Every argv
-and every stdin payload is logged in COMMAND_LOG and STDIN_LOG.
+Process is the one stand-in with behaviour. It plays tormarchyd: started, it
+writes the view named by TORMARCHY_STUB_VIEW as one line and keeps running,
+recording every line written to its stdin in STDIN_LOG; with no view named it
+behaves as Quickshell does for a program that is not installed -- running falls
+back to false, with neither a start nor an exit. Anything else run is logged in
+COMMAND_LOG and exits 0.
 """
 import os
 
@@ -228,23 +228,34 @@ def _proc_set_running(self, v):
         QTimer.singleShot(0, lambda: _proc_start(self))
 
 
+def _argv(self):
+    return [str(c) for c in (getattr(self, "_command", []) or [])]
+
+
+def _is_daemon(self):
+    argv = _argv(self)
+    return bool(argv) and argv[0].endswith("tormarchyd")
+
+
 def _proc_start(self):
     if not _proc_get_running(self):
         return
-    # A program that is not installed, the way Quickshell reports one: no
-    # started, no exited, only running falling back to false.
-    missing = os.environ.get("TORMARCHY_STUB_MISSING", "")
-    argv = [str(c) for c in (getattr(self, "_command", []) or [])]
-    if missing and argv[:1] == [missing]:
-        COMMAND_LOG.append(argv)
-        self._running = False
-        self.runningChanged.emit()
-        return
+    argv = _argv(self)
+    COMMAND_LOG.append(argv)
+    if _is_daemon(self):
+        view = _fixture("TORMARCHY_STUB_VIEW")
+        if view is None:
+            # Not installed, the way Quickshell reports it.
+            self._running = False
+            self.runningChanged.emit()
+            return
+        self.started.emit()
+        out = getattr(self, "_stdout", None)
+        if out is not None and hasattr(out, "read"):
+            out.read.emit(" ".join(view.split()))
+        return  # keeps running, like the real daemon
     self.started.emit()
-    # With stdin open the process waits for its input to end, as a real one
-    # reading to EOF would; closing stdin (stdinEnabled = false) is the EOF.
-    if not _proc_get_stdin(self):
-        _proc_run(self)
+    _proc_finish(self, 0)
 
 
 def _proc_get_stdin(self):
@@ -256,75 +267,17 @@ def _proc_set_stdin(self, v):
         return
     self._stdinEnabled = v
     self.stdinEnabledChanged.emit()
-    if not v and _proc_get_running(self):
-        QTimer.singleShot(0, lambda: _proc_run(self))
 
 
 def _proc_write(self, data):
-    self._stdin = getattr(self, "_stdin", "") + str(data)
+    for line in str(data).splitlines():
+        STDIN_LOG.append((" ".join(_argv(self)), line))
 
 
 def _proc_finish(self, code):
     self._running = False
     self.runningChanged.emit()
     self.exited.emit(code, 0)
-
-
-def _proc_run(self):
-    if not _proc_get_running(self):
-        return
-    argv = [str(c) for c in (getattr(self, "_command", []) or [])]
-    # Matched with the shell quoting run() adds taken off, so
-    # bash -c "exec 'tormarchy' 'connect' 'lan'" reads as tormarchy connect lan.
-    cmd = " ".join(argv).replace("'", "")
-    COMMAND_LOG.append(argv)
-    if getattr(self, "_stdin", ""):
-        STDIN_LOG.append((cmd, self._stdin))
-    out = getattr(self, "_stdout", None)
-    if "pingd" in cmd:
-        if out is not None and hasattr(out, "read"):
-            out.read.emit(os.environ.get("TORMARCHY_STUB_PING", "612"))
-        return  # keeps running, like the real stream
-    text, code = "", 0
-    if "status --json" in cmd and "bridge" not in cmd:
-        text = _fixture("TORMARCHY_STUB_STATUS")
-        if text is None:
-            _proc_finish(self, 127)
-            return
-    elif "doctor --json" in cmd:
-        text = _fixture("TORMARCHY_STUB_DOCTOR") or ""
-        code = 0 if '"ok":true' in text.replace(" ", "") else 1
-    elif "bridge status --json" in cmd:
-        text = _fixture("TORMARCHY_STUB_BRIDGES") or '{"state":"off","count":0,"transports":[]}'
-    elif "bridge check" in cmd:
-        text = _fixture("TORMARCHY_STUB_BRIDGE_CHECK") or ""
-    elif "wl-paste" in cmd:
-        # The capped read in Model.clipboardArgv: 3 is a clipboard over the
-        # limit, 4 one that would not answer, and neither prints anything.
-        code = int(os.environ.get("TORMARCHY_STUB_CLIPBOARD_EXIT", "0"))
-        text = (_fixture("TORMARCHY_STUB_CLIPBOARD") or "") if code == 0 else ""
-    elif "cmp -s" in cmd:
-        # The installed helper against the bundled one: 1 when they differ.
-        code = int(os.environ.get("TORMARCHY_STUB_HELPER_STALE", "0"))
-    elif argv[:1] == ["omarchy-notification-send"]:
-        text = "7\n" if "-p" in argv else ""
-    elif "exit --list" in cmd:
-        text = "de\nnl\nus\nse\nch\n"
-    elif "tormarchy connect" in cmd and os.environ.get("TORMARCHY_STUB_CONNECT_HOLD"):
-        return  # still waiting on tor, like a real connect mid-bootstrap
-    elif "tormarchy disconnect" in cmd and os.environ.get("TORMARCHY_STUB_DISCONNECT_EXIT"):
-        code = int(os.environ["TORMARCHY_STUB_DISCONNECT_EXIT"])
-    elif "tormarchy connect" in cmd and os.environ.get("TORMARCHY_STUB_CONNECT_EXIT"):
-        # A connect that fails the way the real one does: a message on stderr.
-        code = int(os.environ["TORMARCHY_STUB_CONNECT_EXIT"])
-        err = getattr(self, "_stderr", None)
-        if err is not None and hasattr(err, "streamFinished"):
-            err.setProperty("text", os.environ.get("TORMARCHY_STUB_CONNECT_ERROR", "tormarchy: tor stalled at 40% bootstrap."))
-            err.streamFinished.emit()
-    if out is not None and hasattr(out, "streamFinished"):
-        out.setProperty("text", text)
-        out.streamFinished.emit()
-    _proc_finish(self, code)
 
 
 _running_changed = Signal()

@@ -16,7 +16,7 @@ jobs:
     runs-on: ${{ !contains(fromJSON('["pull_request","pull_request_review","pull_request_target","issue_comment","workflow_run"]'), github.event_name) && 'debiantripleu-ci' || 'ubuntu-latest' }}
     if: github.event.pull_request.draft == false
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Which files a pull request touches decides whether a human has to look
       # at it. This plugin runs as root through a passwordless polkit grant,
@@ -33,7 +33,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          files=$(gh pr diff "$PR" --name-only)
+          # From the files endpoint, not `gh pr diff`: that downloads the whole
+          # diff, which GitHub refuses past 20,000 lines, and the gate then
+          # failed before classifying anything. Paginated, so every file of a
+          # large change is seen; a renamed file counts by its new name and its
+          # old one.
+          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)')
+          [[ -n $files ]] || { echo "could not list the changed files"; exit 1; }
           echo "changed files:"; printf '  %s\n' $files
 
           # Deliberately an allowlist, not a blocklist. A new executable file

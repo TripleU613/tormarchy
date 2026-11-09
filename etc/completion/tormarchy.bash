@@ -10,7 +10,7 @@ _tormarchy() {
   cword=$COMP_CWORD
 
   local subs="connect disconnect mode status ip newnym exit bridge browser
-              speed pingd doctor panic boot menu setup uninstall help"
+              speed pingd doctor panic boot menu setup uninstall version help"
 
   if (( cword == 1 )); then
     mapfile -t COMPREPLY < <(compgen -W "$subs" -- "$cur")

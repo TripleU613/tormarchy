@@ -36,21 +36,16 @@ read -ra omarchies <<<"${OMARCHY_PATH:-/usr/share/omarchy}"
 for omarchy in "${omarchies[@]}"; do
   echo "#### $omarchy"
   load "not installed"
-  for state in on off boot blocked socks; do
-    load "$state" --status "$fixtures/$state.json" --bar "$out/bar.png"
+  for state in off boot on blocked socks; do
+    load "$state" --view "$fixtures/view-$state.json" --bar "$out/bar.png"
   done
-  load "leak check, passing" --status "$fixtures/on.json" --doctor "$fixtures/doctor-pass.json" \
-    --expand leaks --call tor.checkLeaks
-  load "leak check, failing" --status "$fixtures/on.json" --doctor "$fixtures/doctor-fail.json" \
-    --expand leaks --call tor.checkLeaks
-  load "bridges, one transport missing" --status "$fixtures/on.json" --bridges "$fixtures/bridges-missing.json" \
-    --expand bridges --call tor.loadBridgeDetail
-  # Bar only: opening the panel is a status read of its own, and this counts them.
+  load "leak check, passing" --view "$fixtures/view-leak-pass.json" --expand leaks
+  load "leak check, failing" --view "$fixtures/view-leak-fail.json" --expand leaks
+  load "bridges, a paste to preview" --view "$fixtures/view-bridges-preview.json" --expand bridges
+  # Bar only: opening the panel starts nothing new, and this counts daemons.
   echo "== shared service"
-  "$python" tests/qml/load.py --omarchy "$omarchy" --status "$fixtures/on.json" --shared \
+  "$python" tests/qml/load.py --omarchy "$omarchy" --view "$fixtures/view-on.json" --shared \
     || failures=$(( failures + 1 ))
-  load "bridges, a paste to preview" --status "$fixtures/on.json" --clipboard "$fixtures/bridges.txt" \
-    --bridge-check "$fixtures/bridge-check-missing.json" --expand bridges --call tor.pasteBridges
 
   echo "== scenarios"
   "$python" tests/qml/scenarios.py --omarchy "$omarchy" || failures=$(( failures + 1 ))

@@ -1,0 +1,97 @@
+#!/bin/bash
+#
+# setup -- install Tormarchy's system side, from a release you can verify.
+#
+#   sudo ~/.config/omarchy/plugins/tripleu.tor/setup
+#
+# The only script left in this plugin, and deliberately small: everything else
+# is the tormarchy and tormarchyd binaries. It fetches the release built for the
+# version this plugin declares, verifies it, and hands over to that binary's own
+# `setup`, which installs it as root.
+#
+# Verification is Sigstore's, not a checksum beside the download: the release's
+# signature must have been made by this repository's own release workflow,
+# running on its master branch, at exactly the commit the version's tag points
+# to on GitHub. Nothing here trusts the files in this (user-writable) checkout,
+# and nothing runs as root until that holds.
+#
+#   sudo ./setup --local target/release   install binaries you built yourself,
+#                                         unverified, for development
+
+set -euo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+umask 077
+
+REPO=TripleU613/tormarchy
+WORKFLOW=".github/workflows/auto-release.yml@refs/heads/master"
+ISSUER=https://token.actions.githubusercontent.com
+HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+
+die() { echo "setup: $*" >&2; exit 1; }
+
+(( EUID == 0 )) || die "run this with sudo: sudo $HERE/setup"
+[[ -z ${PKEXEC_UID:-} ]] || die "run this from a terminal with sudo, not through polkit"
+
+version=$(sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p' "$HERE/manifest.json" | head -1)
+[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "could not read the plugin's version from manifest.json"
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/tormarchy-setup.XXXXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+mkdir "$work/bin"
+
+if [[ ${1:-} == --local ]]; then
+  dir=${2:?usage: setup --local <directory with tormarchy and tormarchyd>}
+  for b in tormarchy tormarchyd; do
+    [[ -f $dir/$b && ! -L $dir/$b ]] || die "$dir/$b is missing"
+    install -m 0755 "$dir/$b" "$work/bin/$b"
+  done
+  echo "Installing UNVERIFIED local binaries from $dir"
+else
+  case $(uname -m) in
+  x86_64) arch=x86_64 ;;
+  *) die "no release is built for $(uname -m); build it yourself and use --local" ;;
+  esac
+  asset="tormarchy-$version-$arch-linux.tar.gz"
+  base="https://github.com/$REPO/releases/download/v$version"
+
+  if ! command -v cosign >/dev/null 2>&1; then
+    echo "Installing cosign, to verify the release"
+    pacman -S --needed --noconfirm cosign || die "could not install cosign. Run 'omarchy update', then setup again."
+  fi
+
+  echo "Fetching Tormarchy $version"
+  fetch() {
+    curl -fsSL --proto '=https' --tlsv1.2 --max-filesize 33554432 --retry 3 -o "$2" "$1" \
+      || die "could not download $1"
+  }
+  fetch "$base/$asset" "$work/$asset"
+  fetch "$base/$asset.sigstore.json" "$work/$asset.sigstore.json"
+
+  # The commit the tag names on GitHub itself -- never this checkout's idea of
+  # it. Peeled, since the tag is annotated.
+  commit=$(git ls-remote "https://github.com/$REPO.git" "refs/tags/v$version^{}" | cut -f1)
+  [[ $commit =~ ^[0-9a-f]{40}$ ]] || die "v$version is not tagged on github.com/$REPO"
+
+  echo "Verifying it was built by github.com/$REPO at $commit"
+  cosign verify-blob \
+    --bundle "$work/$asset.sigstore.json" \
+    --certificate-identity "https://github.com/$REPO/$WORKFLOW" \
+    --certificate-oidc-issuer "$ISSUER" \
+    --certificate-github-workflow-repository "$REPO" \
+    --certificate-github-workflow-sha "$commit" \
+    "$work/$asset" >/dev/null \
+    || die "the release did not verify; nothing was installed"
+
+  # Exactly the two files, nothing else, nowhere else.
+  tar -xzf "$work/$asset" -C "$work/bin" --no-same-owner --no-same-permissions tormarchy tormarchyd \
+    || die "the release archive is not what was expected"
+  for b in tormarchy tormarchyd; do
+    [[ -f $work/bin/$b && ! -L $work/bin/$b ]] || die "the release is missing $b"
+    chmod 0755 "$work/bin/$b"
+  done
+fi
+
+got=$("$work/bin/tormarchy" version 2>/dev/null || true)
+[[ $got == "tormarchy $version" ]] || die "expected tormarchy $version, the binary says '${got:-nothing}'"
+
+"$work/bin/tormarchy" setup

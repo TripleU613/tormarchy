@@ -2,7 +2,7 @@
 """Load the bar widget the way Omarchy's shell does, under a real Qt engine.
 
     python3 tests/qml/load.py --omarchy ~/src/omarchy
-    python3 tests/qml/load.py --omarchy /usr/share/omarchy --status tests/qml/fixtures/on.json \\
+    python3 tests/qml/load.py --omarchy /usr/share/omarchy --view tests/qml/fixtures/view-on.json \\
         --bar bar.png --panel panel.png
 
 The shell loads a third-party widget with Qt.createComponent and, if that
@@ -30,18 +30,14 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--omarchy", default=os.environ.get("OMARCHY_PATH", "/usr/share/omarchy"),
                 help="Omarchy checkout or install whose shell/ to load against")
 ap.add_argument("--plugin", default=REPO)
-ap.add_argument("--status", help="JSON to answer `tormarchy status --json` with; without it, "
-                                 "the helper reads as not installed")
+ap.add_argument("--view", help="the daemon view to load with, e.g. tests/qml/fixtures/view-on.json; "
+                               "without it, the helper reads as not installed")
 ap.add_argument("--bar", help="save the bar slot to this PNG")
 ap.add_argument("--panel", help="open the panel and save it to this PNG")
 ap.add_argument("--card", help="with --panel, also save just the panel itself, cropped, to this PNG")
 ap.add_argument("--foreground", default="#cdd6f4")
 ap.add_argument("--background", default="#1e1e2e")
 ap.add_argument("--settle", type=int, default=1500, help="milliseconds to run before reporting")
-ap.add_argument("--doctor", help="JSON to answer `tormarchy doctor --json` with")
-ap.add_argument("--bridges", help="JSON to answer `tormarchy bridge status --json` with")
-ap.add_argument("--bridge-check", help="JSON to answer `tormarchy bridge check` with")
-ap.add_argument("--clipboard", help="file whose contents `wl-paste` returns")
 ap.add_argument("--shared", action="store_true",
                 help="offer the widget its plugin's service the way the built-in bar does, and check it is used")
 ap.add_argument("--expand", choices=["leaks", "bridges"], help="open this tool beneath the tools band")
@@ -59,11 +55,8 @@ args = ap.parse_args()
 shell_dir = os.path.join(os.path.abspath(os.path.expanduser(args.omarchy)), "shell")
 if not os.path.isdir(os.path.join(shell_dir, "Ui")):
     sys.exit(f"no Omarchy shell at {shell_dir} -- pass --omarchy <checkout>")
-for value, name in ((args.status, "TORMARCHY_STUB_STATUS"), (args.doctor, "TORMARCHY_STUB_DOCTOR"),
-                    (args.bridges, "TORMARCHY_STUB_BRIDGES"), (args.bridge_check, "TORMARCHY_STUB_BRIDGE_CHECK"),
-                    (args.clipboard, "TORMARCHY_STUB_CLIPBOARD")):
-    if value:
-        os.environ[name] = os.path.abspath(value)
+if args.view:
+    os.environ["TORMARCHY_STUB_VIEW"] = os.path.abspath(args.view)
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 if args.scale != 1.0:
@@ -332,13 +325,12 @@ def report():
         print("FAIL  Panel.qml compiled but did not instantiate")
         failed = True
     if shared is not None and not failed:
-        reads = [a for a in quickshell_stubs.COMMAND_LOG
-                 if "status --json" in " ".join(a) and "bridge" not in " ".join(a)]
+        daemons = [a for a in quickshell_stubs.COMMAND_LOG if a and a[0].endswith("tormarchyd")]
         if not win.property("usesSharedService"):
             print("FAIL  the widget was offered its plugin's service and did not use it")
             failed = True
-        elif len(reads) != 1:
-            print(f"FAIL  {len(reads)} status reads where the shared service alone makes one: "
+        elif len(daemons) != 1:
+            print(f"FAIL  {len(daemons)} daemons started where the shared service alone runs one: "
                   "the widget's own copy is not idle")
             failed = True
         else:
@@ -390,7 +382,7 @@ def report():
         for argv in quickshell_stubs.COMMAND_LOG:
             print("ran  ", argv)
         for cmd, data in quickshell_stubs.STDIN_LOG:
-            print("stdin", repr(cmd), "<-", repr(data[:80]))
+            print("sent ", repr(data[:120]))
     print("result: " + ("FAIL" if failed else "ok") + f" ({reported} message(s) from the plugin)")
     shutil.rmtree(imports, ignore_errors=True)
     app.exit(1 if failed else 0)

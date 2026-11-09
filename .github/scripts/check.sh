@@ -4,9 +4,9 @@
 #
 #   .github/scripts/check.sh
 #
-# CI calls this same file, so a green run here means a green run there. Nothing
-# in it needs root, Omarchy, or Quickshell -- it works on a bare runner and on a
-# contributor's laptop.
+# CI calls this same file, so a green run here means a green run there. It needs
+# Rust and Python, not Omarchy or Quickshell. Under sudo it also validates the
+# rulesets against the kernel and runs the kill switch in network namespaces.
 
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 1
@@ -17,33 +17,64 @@ fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; failures=$(( failures + 1 ))
 note() { printf '  \033[90m--\033[0m    %s\n' "$1"; }
 group() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-# ---------------------------------------------------------------------- shell --
+# ----------------------------------------------------------------------- rust --
 
-group "Shell"
+group "Rust"
 
-if bash -n tormarchy 2>/dev/null; then
-  pass "tormarchy parses"
-else
-  bash -n tormarchy
-  fail "tormarchy has a syntax error"
-fi
-
-if command -v shellcheck >/dev/null 2>&1; then
-  # Errors block; warnings and below are printed but do not fail the build.
-  # A 1200-line script accumulates stylistic warnings that are not worth
-  # gating a contributor's pull request on, but a genuine error is.
-  if shellcheck --severity=error tormarchy; then
-    pass "shellcheck reports no errors"
+# Under sudo -- for the kernel checks below -- cargo still runs as the person
+# who ran sudo. Run as root it leaves target/ and the registry cache owned by
+# root, and the next unprivileged build fails on them: the release job builds
+# straight after this script.
+cargo() {
+  if (( EUID == 0 )) && [[ -n ${SUDO_USER:-} && $SUDO_USER != root ]]; then
+    runuser -u "$SUDO_USER" -- env PATH="$PATH" HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)" cargo "$@"
   else
-    fail "shellcheck reports errors"
+    command cargo "$@"
   fi
-  shellcheck --severity=warning tormarchy >/dev/null 2>&1 \
-    || note "shellcheck has warnings (advisory, not blocking): shellcheck tormarchy"
+}
+
+if ! command -v cargo >/dev/null 2>&1; then
+  fail "cargo is not installed: the helper and the daemon cannot be built or tested"
+else
+  cargo fmt --all --check >/dev/null 2>&1 && pass "formatted" || fail "not formatted (cargo fmt --all)"
+  if cargo clippy --workspace --all-targets --locked --quiet -- -D warnings >/tmp/tormarchy-clippy.log 2>&1; then
+    pass "clippy reports nothing"
+  else
+    tail -30 /tmp/tormarchy-clippy.log
+    fail "clippy has findings"
+  fi
+  if cargo test --workspace --locked --quiet >/tmp/tormarchy-cargo-test.log 2>&1; then
+    pass "$(grep -h -o 'ok\. [0-9]* passed' /tmp/tormarchy-cargo-test.log | awk '{n += $2} END {print n}') unit and socket tests pass"
+  else
+    grep -E 'FAILED|panicked|error' /tmp/tormarchy-cargo-test.log | head -20
+    fail "cargo test failed"
+  fi
+  cargo build --locked --quiet 2>/dev/null && pass "the helper and the daemon build" || fail "cargo build failed"
+fi
+bin=target/debug/tormarchy
+
+# The release is the manifest's version: setup fetches by it, and the panel
+# offers "Update helper" when the two differ.
+manifest_version=$(python3 -c 'import json; print(json.load(open("manifest.json"))["version"])')
+cargo_version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+[[ $manifest_version == "$cargo_version" ]] && pass "manifest and binaries are both $cargo_version" \
+  || fail "manifest.json says $manifest_version but Cargo.toml says $cargo_version"
+
+group "Bootstrap"
+
+bash -n setup 2>/dev/null && pass "setup parses" || fail "setup has a syntax error"
+[[ -x setup ]] && pass "setup is executable" || fail "setup is not executable (chmod +x)"
+if command -v shellcheck >/dev/null 2>&1; then
+  shellcheck --severity=warning setup tests/kernel/killswitch.sh .github/scripts/*.sh tests/run && pass "shellcheck reports nothing" \
+    || fail "shellcheck has findings"
 else
   note "shellcheck not installed, skipping lint"
 fi
-
-[[ -x tormarchy ]] && pass "tormarchy is executable" || fail "tormarchy is not executable (chmod +x)"
+# What setup verifies is pinned to what the release job signs with.
+grep -q 'WORKFLOW=".github/workflows/auto-release.yml@refs/heads/master"' setup \
+  && grep -q 'auto-release.yml@refs/heads/master' .github/workflows/auto-release.yml \
+  && pass "setup verifies the identity the release job signs with" \
+  || fail "setup and the release workflow disagree on the signing identity"
 
 # ----------------------------------------------------------------------- data --
 
@@ -166,7 +197,7 @@ def strip(src):
     return "".join(out)
 
 bad = []
-for path in sorted(glob.glob("*.qml")) + ["Model.js"]:
+for path in sorted(glob.glob("*.qml")):
     text = strip(open(path).read())
     # Braces and brackets only. Parentheses appear inside regex literals often
     # enough that counting them is more likely to report a phantom than a bug.
@@ -181,7 +212,7 @@ if bad:
         print(f"  \033[31mFAIL\033[0m  {b}")
     sys.exit(1)
 
-print(f"  \033[32mok\033[0m    {len(glob.glob('*.qml')) + 1} QML/JS files are balanced")
+print(f"  \033[32mok\033[0m    {len(glob.glob('*.qml'))} QML files are balanced")
 PY
 
 # Every file the manifest points at must be tracked, or a fresh clone gets a
@@ -244,7 +275,7 @@ group "Firewall ruleset"
 # netlink access), even though the ruleset printed perfectly well. Generation and
 # validation are separate questions, so they get separate checks.
 for mode in strict lan socks; do
-  ./tormarchy connect --dry-run "$mode" >"/tmp/ruleset-$mode.nft" 2>/dev/null || true
+  "$bin" connect --dry-run "$mode" >"/tmp/ruleset-$mode.nft" 2>/dev/null || true
   if grep -q "table inet tormarchy" "/tmp/ruleset-$mode.nft" 2>/dev/null; then
     pass "$mode ruleset generates"
   else
@@ -356,37 +387,25 @@ group "Pinned decisions"
 # firewall, pinned at the source level instead.
 bash tests/test_decisions.sh || failures=$(( failures + 1 ))
 
-group "Helpers"
+group "The daemon"
 
-# The script's own logic with the machine stubbed out: IPv6 save and restore,
-# the boot marker, circuit selection, the status JSON. The IPv6 cases need root
-# and skip themselves without it; CI runs this under sudo.
-bash tests/test_helpers.sh || failures=$(( failures + 1 ))
-
-group "Model"
-
-if command -v node >/dev/null 2>&1; then
-  node tests/test_model.js || failures=$(( failures + 1 ))
-  # The clipboard read, run through bash against a wl-paste that never stops.
-  node tests/clipboard.js || failures=$(( failures + 1 ))
+# The real tormarchyd against a control port on a real socket, a recording
+# helper, and stand-ins for the notifier and the clipboard.
+if [[ -x target/debug/tormarchyd ]]; then
+  python3 tests/daemon/scenarios.py target/debug/tormarchyd >/tmp/tormarchy-daemon.log 2>&1 \
+    && pass "$(grep -c '  ok' /tmp/tormarchy-daemon.log) daemon scenarios pass" \
+    || { grep -E 'FAIL|Error|Traceback' -A2 /tmp/tormarchy-daemon.log | head -20; fail "daemon scenarios failed"; }
 else
-  note "node not installed, skipping Model.js tests"
+  fail "no daemon to test"
 fi
 
 group "Commands"
 
-missing=""
-for sub in help status ip newnym exit bridge browser browser-exec browser-lock speed doctor panic connect disconnect mode setup uninstall pingd boot; do
-  # The pattern allows "status)" and "help | -h | --help)" alike.
-  grep -qE "^${sub}[)| ]" tormarchy || missing+=" $sub"
-done
-if [[ -z $missing ]]; then
-  pass "every documented subcommand is dispatched"
-else
-  fail "dispatcher is missing:$missing"
-fi
-
-./tormarchy help >/dev/null 2>&1 && pass "help runs" || fail "help does not run"
+"$bin" help >/dev/null 2>&1 && pass "help runs" || fail "help does not run"
+PKEXEC_UID=0 "$bin" setup >/dev/null 2>&1 && fail "setup ran through polkit" \
+  || pass "setup refuses to run through polkit"
+PKEXEC_UID=0 "$bin" browser-exec -- true >/dev/null 2>&1 && fail "browser-exec ran through polkit" \
+  || pass "browser-exec refuses to run through polkit"
 
 group "Result"
 if (( failures == 0 )); then

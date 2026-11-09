@@ -5,3 +5,4 @@
 # Claude Code local settings -- machine-specific permissions, not project config.
 .claude/
 __pycache__/
+/target/

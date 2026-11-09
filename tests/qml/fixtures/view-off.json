@@ -1,0 +1,117 @@
+{
+  "view": {
+    "actionStatus": "",
+    "active": false,
+    "bar": "off",
+    "bridges": {
+      "canApply": false,
+      "chips": [],
+      "hasPreview": false,
+      "invalidLabel": "",
+      "message": {
+        "full": "",
+        "short": ""
+      },
+      "previewText": "",
+      "state": "off",
+      "subtitle": "Off",
+      "toggleLabel": "",
+      "working": false
+    },
+    "busy": false,
+    "canNewCircuit": false,
+    "canToggle": true,
+    "error": {
+      "full": "",
+      "short": ""
+    },
+    "exitCaption": "EXIT",
+    "exitOptions": [
+      {
+        "description": "Let Tor choose the exit",
+        "label": "Automatic",
+        "value": "auto"
+      },
+      {
+        "description": "Recent",
+        "label": "Sweden",
+        "value": "se"
+      },
+      {
+        "label": "France",
+        "value": "fr"
+      },
+      {
+        "label": "Germany",
+        "value": "de"
+      },
+      {
+        "label": "Netherlands",
+        "value": "nl"
+      },
+      {
+        "label": "Switzerland",
+        "value": "ch"
+      },
+      {
+        "label": "United States",
+        "value": "us"
+      }
+    ],
+    "exitValue": "auto",
+    "helperStale": false,
+    "installed": true,
+    "latency": {
+      "caption": "",
+      "captionError": false,
+      "fraction": 0.0,
+      "measuring": false,
+      "text": "— ms"
+    },
+    "leak": {
+      "checking": false,
+      "checks": [],
+      "failed": false,
+      "glyph": "󰕥",
+      "hasResult": false,
+      "subtitle": "Not run yet",
+      "subtitleError": false
+    },
+    "mode": "lan",
+    "modes": [
+      {
+        "label": "Maximum",
+        "selected": false,
+        "tip": "All traffic through Tor. Local network dropped\ntoo.",
+        "value": "strict"
+      },
+      {
+        "label": "Standard",
+        "selected": true,
+        "tip": "All internet traffic through Tor. Local\nnetwork still reachable.",
+        "value": "lan"
+      },
+      {
+        "label": "Browser only",
+        "selected": false,
+        "tip": "Nothing is routed system-wide. Any app that\nspeaks SOCKS can opt in on 127.0.0.1:9050 — a\nbrowser is just the usual one.",
+        "value": "socks"
+      }
+    ],
+    "protocol": 1,
+    "stats": {
+      "age": "0s",
+      "hops": [],
+      "traffic": "↓ 0 B ↑ 0 B",
+      "visible": false
+    },
+    "statusText": "Disconnected",
+    "switchCaption": "OFF",
+    "switchCaptionLit": false,
+    "version": "2.0.0",
+    "warning": {
+      "full": "",
+      "short": ""
+    }
+  }
+}
