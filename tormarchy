@@ -57,9 +57,14 @@ CONTROL_PORT=9051
 # The most a single control-port reply may occupy. Every caller captures the
 # whole reply in a shell variable, and the panel asks again every few seconds,
 # so an endpoint that answers without ever stopping would grow that process for
-# as long as the timeout allows. The ceiling is far above any real reply: the
-# largest is a full circuit-status listing, a few hundred bytes per circuit.
+# as long as the timeout allows. The ceiling is far above any reply the polled
+# commands get: the largest is a full circuit-status listing, a few hundred
+# bytes per circuit.
 CONTROL_REPLY_BYTE_LIMIT=262144
+# The one reply that is not small: the whole consensus, for `exit --list`. About
+# 200 bytes a relay, so around 1.5 MB with today's eight thousand relays. Asked
+# for only when someone opens the exit picker, never on the poll.
+CONSENSUS_REPLY_BYTE_LIMIT=$(( 32 * 1024 * 1024 ))
 # check.torproject.org's answer is a few dozen bytes. The leak check prints part
 # of it, and what it prints goes into the shell that runs the bar, so a larger
 # answer is a failed check rather than something to pass along.
@@ -73,9 +78,19 @@ NFT_TABLE="tormarchy"
 # replaced on every connect and mode change and deleted on disconnect, and none
 # of that may unlock a browser that is still running.
 NFT_BROWSER_TABLE="tormarchy_browser"
+# Where nft resolves a `socket cgroupv2` path, and where the scopes it names are.
+CGROUP_ROOT="/sys/fs/cgroup"
+# Serialises browser-lock. Each one rebuilds the whole set of browser rules,
+# and two at once could each commit a set missing the other's browser.
+BROWSER_LOCK_FILE="/run/tormarchy-browser.lock"
 STATE_DIR="/run/tormarchy"
 # Outside STATE_DIR, which disconnect deletes while another command may hold it.
 LOCK_FILE="/run/tormarchy.lock"
+# A fresh token every time panic runs, outside STATE_DIR for the same reason.
+# Panic takes no lock, so a connect or mode change can be part-way through
+# putting rules on when it lands; they compare this before and after, and take
+# their rules back off if it changed.
+PANIC_MARKER="/run/tormarchy.panic"
 MODE_FILE="$STATE_DIR/mode"
 ACTIVE_FILE="$STATE_DIR/active"
 IPV6_STATE_FILE="$STATE_DIR/ipv6-was"
@@ -364,7 +379,8 @@ tor_control() {
     # returns as soon as the limit is reached, and the timeout remains the bound
     # on an endpoint that stalls instead of flooding. A reply large enough to be
     # truncated no longer parses, and every caller treats an unparseable reply
-    # as no answer.
+    # as no answer. A caller whose reply is a listing, where a cut-off one would
+    # still parse as a shorter list, checks for the listing's own terminator.
     timeout "${TOR_CONTROL_TIMEOUT:-5}" head -c "$CONTROL_REPLY_BYTE_LIMIT" <&3
     status=$?
     { exec 3<&- 3>&-; } 2>/dev/null
@@ -801,6 +817,20 @@ take_lock() {
   flock -w 30 9 2>/dev/null || die "another tormarchy command is still changing the network; try again"
 }
 
+panic_token() { cat -- "$PANIC_MARKER" 2>/dev/null; }
+
+# Called once rules are on. Panic flushes after it writes its token, so either
+# the token is already new here, or panic's flush runs after these rules went on
+# and removes them itself. Either way the machine ends with no rules.
+undo_if_panicked() {
+  [[ $(panic_token) == "$1" ]] && return 0
+  flush_rules
+  ipv6_restore
+  rm -rf "$STATE_DIR"
+  forget_connected
+  die "cancelled: panic ran while the rules were going on, and they are off again"
+}
+
 write_state() {
   local mode="$1" active="$2" staging
   install -d -m 0755 "$STATE_DIR"
@@ -1070,6 +1100,8 @@ cmd_connect() {
   fi
 
   require_root
+  local panic_before
+  panic_before=$(panic_token)
 
   command -v tor >/dev/null 2>&1 || die "tor is not installed -- run setup first"
   [[ -f $TORRC_BASE ]] || die "$TORRC_BASE is missing -- run setup first"
@@ -1176,6 +1208,7 @@ NOTE
 
   write_state "$mode" yes
   remember_connected "$mode"
+  undo_if_panicked "$panic_before"
   echo "Connected. All traffic now routes through Tor ($mode mode)."
 }
 
@@ -1197,6 +1230,12 @@ cmd_disconnect() {
 cmd_panic() {
   require_root
   # Deliberately no lock. The escape hatch must never wait behind anything.
+  # Instead a new token, before anything is flushed, tells a connect or mode
+  # change that is applying rules right now to take them back off.
+  local token
+  token="$(date +%s%N).$$"
+  printf '%s\n' "$token" >"$PANIC_MARKER" 2>/dev/null \
+    || echo "note: could not mark the panic for a connect in flight" >&2
   flush_rules
   ipv6_restore
   # tor too, without waiting on it. A connect still bootstrapping checks that
@@ -1220,6 +1259,8 @@ cmd_mode() {
 
   # Before reading what is on, not after: a disconnect landing in between left
   # this applying a ruleset to a machine whose tor had just been stopped.
+  local panic_before
+  panic_before=$(panic_token)
   take_lock
   local was_routed=false browser_on=false
   rules_present && was_routed=true
@@ -1244,6 +1285,7 @@ cmd_mode() {
     ipv6_disable || true
     write_state "$mode" yes
     remember_connected "$mode"
+    undo_if_panicked "$panic_before"
     echo "Switched to $mode mode."
   elif $browser_on; then
     # Browser-only was on, so this stays on: in the new mode that means its
@@ -1358,8 +1400,13 @@ cmd_exit() {
   if [[ $target == --list ]]; then
     tor_is_running || die "tor is not running"
     TOR_CONTROL_TIMEOUT=60
-    local ns
+    local ns CONTROL_REPLY_BYTE_LIMIT=$CONSENSUS_REPLY_BYTE_LIMIT
     ns=$(tor_control 'GETINFO ns/all') || die "could not reach tor's control port"
+    # The consensus is a data reply: it ends with a lone "." and then 250 OK.
+    # One cut off at the limit or the timeout has no end, and parsed anyway it
+    # was a list missing every country past the cut, given as the whole list.
+    [[ $ns == *$'\r\n.\r\n250 OK'* ]] \
+      || die "tor's relay list came back incomplete; try again in a moment"
 
     local -a ips=()
     mapfile -t ips < <(awk '
@@ -1466,8 +1513,17 @@ transports_in() {
 # a torrc. Carriage returns go, and so does a leading "Bridge ", torrc's own
 # prefix, which bridge_activate puts back -- so a pasted line and a typed one
 # stage the same.
+# stdin, one byte past the limit at most, and refused whole if it gets there.
+# Cut at the limit instead, the last line ended wherever the cut fell -- inside
+# a cert, still shaped like a bridge line -- and that set went live with the
+# rest dropped and nothing said. NUL becomes a control character the line
+# check rejects, as the panel's own capped read does, rather than vanishing.
 normalize_bridge_lines() {
-  head -c "$BRIDGE_INPUT_BYTE_LIMIT" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/^Bridge[[:space:]]+//'
+  local LC_ALL=C raw
+  raw=$(head -c "$(( BRIDGE_INPUT_BYTE_LIMIT + 1 ))" | tr '\000' '\001'; printf x)
+  raw=${raw%x}
+  (( ${#raw} <= BRIDGE_INPUT_BYTE_LIMIT )) || return 1
+  printf '%s' "$raw" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/^Bridge[[:space:]]+//'
 }
 
 # "<transport> <count>" per line, "plain <count>" for bridges without one.
@@ -1619,11 +1675,23 @@ cmd_bridge() {
     fi
     if [[ -f $TORRC_BRIDGES ]]; then
       echo "Bridges: ACTIVE"
-      local t
-      while read -r t; do
-        [[ -n $t ]] || continue
-        printf '  %s (%s)\n' "$t" "$(transport_binary "$t" >/dev/null 2>&1 && echo available || echo MISSING)"
-      done < <(transports_in "$TORRC_BRIDGES")
+      # From the saved lines, which the live file is always written from -- not
+      # from that file, which is tor config: its first words are UseBridges and
+      # ClientTransportPlugin, never a transport. Without root, the summary.
+      local t n counts=""
+      if [[ -r $BRIDGE_STASH ]]; then
+        counts=$(bridge_counts "$BRIDGE_STASH")
+      elif [[ -r $BRIDGE_SUMMARY ]]; then
+        counts=$(head -c 4096 -- "$BRIDGE_SUMMARY")
+      fi
+      while read -r t n; do
+        [[ $t =~ ^[a-z0-9_]+$ && $n =~ ^[0-9]+$ ]] || continue
+        if [[ $t == plain ]]; then
+          printf '  %s plain (no transport needed)\n' "$n"
+        else
+          printf '  %s %s (%s)\n' "$n" "$t" "$(transport_binary "$t" >/dev/null 2>&1 && echo available || echo MISSING)"
+        fi
+      done <<<"$counts"
     elif [[ -f $BRIDGE_STASH ]]; then
       echo "Bridges: off (lines stashed -- 'tormarchy bridge on' to use them)"
     else
@@ -1637,7 +1705,8 @@ cmd_bridge() {
     # It writes nothing anywhere; the lines live in a variable and are gone when
     # this exits.
     local input
-    input=$(normalize_bridge_lines)
+    input=$(normalize_bridge_lines) \
+      || die "more than $(( BRIDGE_INPUT_BYTE_LIMIT / 1024 )) KiB on stdin; that is not a set of bridge lines"
     printf '{"invalidLines":%d,%s}\n' \
       "$(bridge_invalid_count /dev/stdin <<<"$input")" \
       "$(bridge_counts /dev/stdin <<<"$input" | bridge_counts_json)"
@@ -1666,7 +1735,8 @@ cmd_bridge() {
     BRIDGE_STAGING=$(mktemp "$TORRC_DIR/.bridges.XXXXXX") || die "could not create a staging file"
     trap 'rm -f -- "$BRIDGE_STAGING"' EXIT
     chmod 0600 "$BRIDGE_STAGING"
-    normalize_bridge_lines >"$BRIDGE_STAGING"
+    normalize_bridge_lines >"$BRIDGE_STAGING" \
+      || die "more than $(( BRIDGE_INPUT_BYTE_LIMIT / 1024 )) KiB on stdin; that is not a set of bridge lines, and nothing was changed"
     [[ -s $BRIDGE_STAGING ]] || die "no input on stdin; pipe bridge lines in, e.g. tormarchy bridge set < bridges.txt"
     local counts invalid
     counts=$(bridge_counts "$BRIDGE_STAGING")
@@ -2035,9 +2105,15 @@ cmd_browser_exec() {
 #
 # The scope is read from the caller's own process rather than taken as an
 # argument, and has to be one of the invoking user's tormarchy-browser scopes,
-# so this can only ever restrict the browser that asked. Rules accumulate one
-# per launch and are dropped when the scope's cgroup goes away with it -- the
-# id they match is never reused -- or at reboot.
+# so this can only ever restrict the browser that asked.
+#
+# A rule matches a cgroup by id, and the kernel keeps it after the cgroup is
+# gone, so rules added one per launch only ever grew -- a dead rule per browser
+# ever opened, each walked by every packet the machine sent, and as many more as
+# anything in a browser scope cared to ask for. Instead every call rebuilds the
+# set: one rule for each browser scope that exists right now, the caller's
+# included, in a single transaction. A running browser is never without its
+# rule, even for the instant the set is swapped.
 #
 # Loopback is all it may reach, and port 53 not even there: the system's stub
 # resolver lives on loopback and forwards whatever it is asked to the real DNS
@@ -2057,10 +2133,51 @@ cmd_browser_lock() {
   [[ $cgroup =~ ^user\.slice/user-$uid\.slice/user@$uid\.service/([a-z-]+\.slice/)?tormarchy-browser-[A-Za-z0-9_.-]+\.scope$ ]] \
     || die "refusing to lock $cgroup: not a tormarchy browser scope belonging to $user"
 
-  local -a parts
-  IFS=/ read -ra parts <<<"$cgroup"
+  { exec 8>"$BROWSER_LOCK_FILE"; } 2>/dev/null \
+    && flock -w 10 8 2>/dev/null \
+    || die "another browser is being locked right now; try again"
 
-  nft -f - <<RULES || die "nft rejected the browser lockdown (it needs nftables socket cgroupv2 matching, kernel 5.13+)"
+  # nft refuses the whole set if any scope in it is gone by the time it
+  # commits -- another browser closing in between -- so a refusal is retried
+  # on a fresh look before it counts.
+  local -a scopes
+  local attempt
+  for attempt in 1 2 3; do
+    mapfile -t scopes < <(browser_scopes "$cgroup")
+    browser_ruleset "${scopes[@]}" | nft -f - 2>/dev/null && return 0
+  done
+  die "nft rejected the browser lockdown (it needs nftables socket cgroupv2 matching, kernel 5.13+)"
+}
+
+# Every browser scope that exists now, the caller's first: one per line, as
+# paths under CGROUP_ROOT.
+browser_scopes() {
+  local caller=$1 path rel
+  local nullglob_was
+  printf '%s\n' "$caller"
+  nullglob_was=$(shopt -p nullglob)
+  shopt -s nullglob
+  for path in "$CGROUP_ROOT"/user.slice/user-*.slice/user@*.service/tormarchy-browser-*.scope \
+              "$CGROUP_ROOT"/user.slice/user-*.slice/user@*.service/*.slice/tormarchy-browser-*.scope; do
+    [[ -d $path ]] || continue
+    rel=${path#"$CGROUP_ROOT"/}
+    [[ $rel == "$caller" ]] && continue
+    # Only browser scopes, each inside its own user's manager. Anything in one
+    # was locked when it launched; this keeps it locked.
+    [[ $rel =~ ^user\.slice/user-([0-9]+)\.slice/user@([0-9]+)\.service/([a-z-]+\.slice/)?tormarchy-browser-[A-Za-z0-9_.-]+\.scope$ ]] \
+      || continue
+    [[ ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" ]] || continue
+    printf '%s\n' "$rel"
+  done
+  eval "$nullglob_was"
+}
+
+# The browser table with one jump to lockdown per scope given, replacing what
+# was there in the same transaction.
+browser_ruleset() {
+  local scope
+  local -a parts
+  cat <<RULES
 table inet $NFT_BROWSER_TABLE {
   chain output {
     type filter hook output priority filter; policy accept;
@@ -2072,8 +2189,13 @@ flush chain inet $NFT_BROWSER_TABLE lockdown
 add rule inet $NFT_BROWSER_TABLE lockdown meta l4proto { tcp, udp } th dport 53 drop
 add rule inet $NFT_BROWSER_TABLE lockdown oifname "lo" accept
 add rule inet $NFT_BROWSER_TABLE lockdown counter drop
-add rule inet $NFT_BROWSER_TABLE output socket cgroupv2 level ${#parts[@]} "$cgroup" jump lockdown
+flush chain inet $NFT_BROWSER_TABLE output
 RULES
+  for scope in "$@"; do
+    IFS=/ read -ra parts <<<"$scope"
+    printf 'add rule inet %s output socket cgroupv2 level %d "%s" jump lockdown\n' \
+      "$NFT_BROWSER_TABLE" "${#parts[@]}" "$scope"
+  done
 }
 
 # ---- diagnostics ----
@@ -2715,7 +2837,7 @@ cmd_uninstall() {
     && echo "  removed the $NFT_BROWSER_TABLE table"
   ipv6_restore
   rm -rf "$STATE_DIR"
-  rm -f "$LOCK_FILE"
+  rm -f "$LOCK_FILE" "$PANIC_MARKER" "$BROWSER_LOCK_FILE"
 
   # Before tor stops and before the binary goes: a boot unit left behind would
   # try to reconnect on the next boot with nothing installed to do it.
@@ -2730,11 +2852,13 @@ cmd_uninstall() {
   fi
   rm -rf "$PERSIST_DIR"
 
+  # Stopped, not disabled. Setup never enables tor -- connect starts it on
+  # demand -- so whether it starts at boot is a choice made before this was
+  # installed, and putting things back means leaving that choice as it was.
   step "Stopping tor"
   systemctl stop tor.service 2>/dev/null || true
-  systemctl disable tor.service 2>/dev/null || true
   systemctl reset-failed tor.service 2>/dev/null || true
-  echo "  stopped and disabled"
+  echo "  stopped (whether it starts at boot is left as it was)"
 
   # Before the files go: these rows would otherwise call a command that is no
   # longer there.

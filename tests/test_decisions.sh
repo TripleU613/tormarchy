@@ -296,6 +296,8 @@ echo "Escapes and disconnections"
 # not locked at all. The lock is an nftables rule on the scope's cgroup instead.
 reject "browser-only does not rely on IPAddressDeny" tormarchy "--property=IPAddressDeny"
 want "browser-only is locked by cgroup in nftables" tormarchy 'socket cgroupv2 level'
+reject "uninstall does not disable a tor it never enabled" tormarchy 'systemctl disable tor.service'
+reject "setup does not enable tor at boot behind anyone's back" tormarchy 'systemctl enable tor.service'
 want "the browser is not started if the lock fails" tormarchy 'could not lock the browser to Tor, so it was not started'
 # A running Chromium handed a new window opens it in the existing, unproxied
 # process. Its own profile forces an instance of its own.

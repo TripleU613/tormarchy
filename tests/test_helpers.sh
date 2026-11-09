@@ -274,6 +274,68 @@ tor_control() {
 }
 is "exit --list prints bare country codes, each once" "$(cmd_exit --list | tr '\n' ' ')" "de "
 
+# The real consensus, through the real tor_control: some eight thousand relays,
+# far past the limit every polled reply is held to. Cut off at that limit, the
+# picker lost every country after the first sixth of the list.
+unset -f tor_control
+# shellcheck source=/dev/null
+source <(sed -n '/^tor_control() {$/,/^}$/p' tormarchy)
+ns_port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+consensus_server() {   # consensus_server <relays> <whether to finish the reply>
+  rm -f "$scratch/ns-ready"
+  # Every relay but the last on one address, so the size is real but the
+  # country lookups that follow stay a single session. The last is the one a
+  # cut at the old limit lost.
+  python3 - "$ns_port" "$scratch/ns-ready" "$1" "$2" <<'PY' &
+import socket, sys
+port, ready, relays, finish = int(sys.argv[1]), sys.argv[2], int(sys.argv[3]), sys.argv[4] == "yes"
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", port)); srv.listen()
+open(ready, "w").close()
+while True:
+    conn, _ = srv.accept()
+    f = conn.makefile("rb")
+    out = []
+    for line in iter(f.readline, b""):
+        if line.startswith(b"QUIT"):
+            break
+        if line.startswith(b"AUTHENTICATE"):
+            conn.sendall(b"250 OK\r\n")
+        elif line.startswith(b"GETINFO ns/all"):
+            body = b"".join(b"r relay%d AAAA BBBB 2026-11-09 00:00:00 %s 9001 0\r\n"
+                            b"s Exit Fast Guard HSDir Running Stable V2Dir Valid\r\n"
+                            b"w Bandwidth=1000\r\n" % (i, b"10.9.9.9" if i == relays - 1 else b"10.0.0.1")
+                            for i in range(relays))
+            out.append(b"250+ns/all=\r\n" + body + (b".\r\n250 OK\r\n" if finish else b""))
+        elif line.startswith(b"GETINFO ip-to-country/"):
+            ip = line.strip().split(b"/", 1)[1]
+            out.append(b"250-ip-to-country/%s=%s\r\n" % (ip, b"zz" if ip == b"10.9.9.9" else b"de"))
+    # Unfinished, the listing just stops: a connection dropped mid-reply,
+    # which reads the same as one cut at a limit.
+    if finish:
+        out.append(b"250 OK\r\n250 closing connection\r\n")
+    conn.sendall(b"".join(out))
+    # The file object holds the socket open too; both go, or no EOF is sent.
+    f.close()
+    conn.close()
+PY
+  consensus=$!
+  for _ in $(seq 100); do [[ -e $scratch/ns-ready ]] && break; sleep 0.05; done
+}
+saved_candidates=("${COOKIE_CANDIDATES[@]}"); saved_port=$CONTROL_PORT
+printf 'cookie' >"$scratch/control.cookie"
+COOKIE_CANDIDATES=("$scratch/control.cookie"); CONTROL_PORT=$ns_port
+consensus_server 8000 yes
+listed=$(cmd_exit --list 2>&1)
+is "a full-size consensus is read to its end, so the last relay's country is listed" "$(tr '\n' ' ' <<<"$listed")" "de zz "
+kill "$consensus" 2>/dev/null; wait "$consensus" 2>/dev/null
+consensus_server 8000 no
+( cmd_exit --list >/dev/null 2>&1 ) \
+  && bad "a consensus that never finished was used as the whole list" \
+  || ok "a consensus cut off before its end is refused, not listed in part"
+kill "$consensus" 2>/dev/null; wait "$consensus" 2>/dev/null
+COOKIE_CANDIDATES=("${saved_candidates[@]}"); CONTROL_PORT=$saved_port
+
 TORRC_DIR="$scratch/torrc.d"; mkdir -p "$TORRC_DIR"
 TORRC_EXIT="$TORRC_DIR/10-tormarchy-exit.conf"
 TORRC_EXCLUDE="$TORRC_DIR/11-tormarchy-exclude.conf"
@@ -313,6 +375,31 @@ is "it names each transport, plain bridges included" \
   && ok "nothing of the lines themselves comes back" || bad "bridge check echoed a line: $check"
 is "empty input is no bridges, not an error" "$(cmd_bridge check </dev/null)" '{"invalidLines":0,"count":0,"transports":[]}'
 
+# The size limit is a refusal, never a cut. Cut, the last line ended wherever
+# the limit fell -- inside a cert, still shaped like a bridge line -- and went
+# live with the rest dropped and nothing said.
+line='obfs4 192.0.2.1:443 AAAA cert=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx iat-mode=0'
+at_limit=$(python3 -c 'import sys; l = sys.argv[1] + "\n"; n = int(sys.argv[2]); body = l * (n // len(l)); print(body + "#" * (n - len(body) - 1))' "$line" "$BRIDGE_INPUT_BYTE_LIMIT")
+is "input exactly at the limit is read whole" "$(printf '%s\n' "$at_limit" | normalize_bridge_lines | wc -c)" "$BRIDGE_INPUT_BYTE_LIMIT"
+( printf '%s\nX' "$at_limit" | cmd_bridge check >/dev/null 2>&1 ) \
+  && bad "a byte over the limit was checked as if it were whole" || ok "a byte over the limit is refused by check"
+(
+  require_root() { :; }
+  TORRC_DIR="$scratch/torrc-set.d"; mkdir -p "$TORRC_DIR"
+  BRIDGE_STASH="$scratch/stash-set/bridges.stash"
+  BRIDGE_SUMMARY="$scratch/stash-set/bridges.summary"
+  write_bridge_summary() { :; }
+  activated=no
+  bridge_activate() { activated=yes; }
+  bridge_reload() { :; }
+  out=$( { printf '%s\n' "$at_limit"; printf '%s\n' "$line"; } | cmd_bridge set 2>&1 )
+  status=$?
+  (( status != 0 )) && ok "set refuses more than the limit" || bad "set took input over the limit"
+  [[ $out == *"nothing was changed"* ]] && ok "and says so" || bad "set's refusal said: $out"
+  [[ $activated == no && ! -e $BRIDGE_STASH && -z $(find "$TORRC_DIR" -type f) ]] \
+    && ok "and nothing is staged, saved or switched to" || bad "an oversized set left something behind"
+)
+
 (
   TORRC_DIR="$scratch/torrc.d"
   TORRC_BRIDGES="$TORRC_DIR/20-tormarchy-bridges.conf"
@@ -347,6 +434,13 @@ if (( EUID == 0 )); then
   is "and is readable by the panel" "$(stat -c %a "$BRIDGE_SUMMARY")" 644
   is "bridge status --json reads it" "$(cmd_bridge status --json)" \
     "{\"state\":\"stashed\",\"count\":2,\"transports\":[{\"name\":\"obfs4\",\"count\":2,\"available\":$(transport_binary obfs4 >/dev/null 2>&1 && echo true || echo false),\"installHint\":\"$(install_hint obfs4)\"}]}"
+  # The text status lists transports, not the tor config they are written as.
+  printf '# Managed by tormarchy.\nUseBridges 1\nClientTransportPlugin obfs4 exec /usr/bin/lyrebird\nBridge obfs4 192.0.2.1:443 AAAA cert=x iat-mode=0\n' >"$TORRC_BRIDGES"
+  text=$(transport_binary() { printf /usr/bin/lyrebird; }; cmd_bridge status)
+  is "bridge status names the transports in use" "$text" $'Bridges: ACTIVE\n  2 obfs4 (available)'
+  text=$(transport_binary() { printf /usr/bin/lyrebird; }; BRIDGE_STASH=/nonexistent; cmd_bridge status)
+  is "and without the saved lines, reads the summary" "$text" $'Bridges: ACTIVE\n  2 obfs4 (available)'
+  rm -f "$TORRC_BRIDGES"
   rm -f "$BRIDGE_STASH"; write_bridge_summary
   [[ ! -e $BRIDGE_SUMMARY ]] && ok "with no saved bridges the summary goes too" || bad "a summary outlived its bridges"
 else
@@ -531,6 +625,98 @@ echo "Panic and mode"
   write_state() { :; }
   cmd_mode strict >/dev/null
   is "mode takes the lock before reading what is on" "$order" "lock read "
+)
+(
+  # Panic takes no lock, so it can land while a mode change is putting rules
+  # on. Here it lands inside apply_rules itself: its flush runs first, then
+  # the rules go on anyway -- the state that used to stick. What happened is
+  # kept in files, since the failure exits the subshell it ran in.
+  PANIC_MARKER="$scratch/panic"
+  rm -f "$PANIC_MARKER"
+  rules="$scratch/rules" remembered="$scratch/remembered"
+  require_root() { :; }
+  take_lock() { :; }
+  rules_present() { return 0; }
+  current_mode() { printf lan; }
+  apply_rules() { cmd_panic >/dev/null; echo on >"$rules"; }
+  flush_rules() { echo off >"$rules"; }
+  ipv6_disable() { :; }
+  ipv6_restore() { :; }
+  write_state() { :; }
+  remember_connected() { echo yes >"$remembered"; }
+  forget_connected() { echo no >"$remembered"; }
+  systemctl() { :; }
+  ( cmd_mode strict ) >/dev/null 2>&1 && bad "a mode change that panic overtook reports success" \
+    || ok "a mode change that panic overtook fails rather than claiming the switch"
+  is "and its rules are taken back off" "$(cat "$rules")" "off"
+  is "and the boot reconnect panic cancelled stays cancelled" "$(cat "$remembered")" "no"
+
+  # Without a panic in between, the same switch keeps its rules.
+  apply_rules() { echo on >"$rules"; }
+  ( cmd_mode strict ) >/dev/null 2>&1 && ok "a mode change panic did not touch succeeds" \
+    || bad "a mode change panic did not touch succeeds"
+  is "and keeps its rules" "$(cat "$rules")" "on"
+)
+(
+  # The same check closes connect: whatever token it started with, a different
+  # one once its rules are on means panic ran in between.
+  PANIC_MARKER="$scratch/panic"
+  flushed="$scratch/flushed"
+  echo no >"$flushed"
+  flush_rules() { echo yes >"$flushed"; }
+  ipv6_restore() { :; }
+  forget_connected() { :; }
+  printf 'before\n' >"$PANIC_MARKER"
+  ( undo_if_panicked "before" ) && ok "no panic in between leaves the rules alone" \
+    || bad "no panic in between leaves the rules alone"
+  is "and flushes nothing" "$(cat "$flushed")" "no"
+  printf 'after\n' >"$PANIC_MARKER"
+  ( undo_if_panicked "before" ) 2>/dev/null && bad "a panic in between does not stop connect" \
+    || ok "a panic in between stops connect"
+  is "and its rules come off" "$(cat "$flushed")" "yes"
+  rm -f "$PANIC_MARKER"
+  ( undo_if_panicked "" ) && ok "with no panic ever run, there is nothing to undo" \
+    || bad "with no panic ever run, there is nothing to undo"
+)
+
+echo "Browser lock"
+
+(
+  # One rule per browser scope that exists, never one per launch. A rule
+  # outlives the cgroup it names, so adding one per launch only ever grew.
+  CGROUP_ROOT="$scratch/cgroup"
+  mine="user.slice/user-1000.slice/user@1000.service/app.slice/tormarchy-browser-firefox-41.scope"
+  other="user.slice/user-1000.slice/user@1000.service/tormarchy-browser-chromium-7.scope"
+  closed="user.slice/user-1000.slice/user@1000.service/app.slice/tormarchy-browser-firefox-9.scope"
+  foreign="user.slice/user-1000.slice/user@1001.service/app.slice/tormarchy-browser-x-1.scope"
+  unrelated="user.slice/user-1000.slice/user@1000.service/app.slice/firefox.scope"
+  for d in "$mine" "$other" "$foreign" "$unrelated"; do mkdir -p "$CGROUP_ROOT/$d"; done
+  is "the caller and every other live browser scope are locked, nothing else" \
+    "$(browser_scopes "$mine" | tr '\n' ' ')" "$mine $other "
+  is "the caller is listed once, even when it is also found" \
+    "$(browser_scopes "$mine" | grep -c -F "$mine")" 1
+  mapfile -t found < <(browser_scopes "$mine")
+  ruleset=$(browser_ruleset "${found[@]}")
+  is "one jump per live scope" "$(grep -c 'jump lockdown' <<<"$ruleset")" 2
+  [[ $ruleset == *"flush chain inet $NFT_BROWSER_TABLE output"* ]] \
+    && ok "the set is replaced, not added to" || bad "the browser rules are appended to, not replaced"
+  grep -q -F "$closed" <<<"$ruleset" && bad "a closed browser kept its rule" || ok "a closed browser's rule goes"
+  grep -q 'level 5 "'"$mine"'"' <<<"$ruleset" && ok "each rule's level is its scope's depth" \
+    || bad "the level does not match the scope's depth: $ruleset"
+
+  # And through cmd_browser_lock itself, with nft and the caller stubbed.
+  BROWSER_LOCK_FILE="$scratch/browser.lock"
+  require_root() { :; }
+  invoking_user() { printf alice; }
+  id() { printf 1000; }
+  awk() { [[ $* == *"/proc/"*"/cgroup"* ]] && { printf '/%s\n' "$mine"; return; }; command awk "$@"; }
+  nft() { [[ $* == "-f -" ]] && cat >"$scratch/applied"; return "${nft_status:-0}"; }
+  for _ in 1 2 3 4 5; do cmd_browser_lock; done
+  is "locking the same browser again and again never grows the set" \
+    "$(grep -c 'jump lockdown' "$scratch/applied")" 2
+  nft_status=1
+  ( cmd_browser_lock ) 2>/dev/null && bad "a lock nft refused was reported as done" \
+    || ok "a lock nft keeps refusing fails, so the browser is not started"
 )
 
 echo "Live latency"
