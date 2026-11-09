@@ -1,18 +1,10 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="Tormarchy" width="340">
+  <img src="preview.png" alt="Tormarchy: Tor for the Omarchy bar. The panel open under its icon in the bar" width="100%">
 </p>
 
 <p align="center">
-  A Tor toggle for the Omarchy bar. Click the onion, all your traffic goes
-  through Tor. Click it again, it doesn't.
+  Click the onion and all your traffic goes through Tor. Click it again, it doesn't.
 </p>
-
----
-
-Needs Omarchy 4.x on x86_64. Everything else it uses is already on an Arch box —
-`nftables`, `systemd`, `polkit`, `curl`, `iproute2`. `setup` installs `tor`, and
-`cosign` to verify the release with. Bridges additionally want `obfs4proxy`
-(AUR) or `meek`, and it'll tell you which if you need them.
 
 ## Install
 
@@ -21,244 +13,187 @@ omarchy plugin add https://github.com/TripleU613/tormarchy.git --enable
 ```
 
 Then click the onion in the bar and press **Set up**. Omarchy asks for your
-password once, Tor and the helper are installed, and a notification says when
-it's ready. After that the switch never asks again.
+password once, and a notification tells you when it's ready. That's it — the
+switch never asks again.
 
-The dialog uses polkit's own wording: it asks to run
-`~/.config/omarchy/plugins/tripleu.tor/setup` as the super user. That's this
-plugin's `setup`, and it's expected.
+<p align="center">
+  <img src="assets/screenshots/setup.png" alt="Before setup: the wordmark and one Set up button" width="40%">
+</p>
 
-Prefer a terminal? `sudo ~/.config/omarchy/plugins/tripleu.tor/setup` does the
-same thing.
+Needs Omarchy 4 on x86_64. Setup installs `tor` for you.
 
-### What setup does
+## What you get
 
-`setup` fetches the release for the version of the plugin you have, and checks
-its signature before anything runs as root: it has to have been signed by this
-repository's own release workflow, on `master`, at exactly the commit that
-version's tag names on GitHub. That's [Sigstore](https://www.sigstore.dev/)
-keyless signing, so there is no key in this repository to trust or to steal.
-If it doesn't verify, nothing is installed.
+- **A real kill switch.** If Tor stops while you're connected, your network
+  stops too instead of quietly leaking.
+- **Three modes.** Everything through Tor, everything but your local network,
+  or just one locked-down browser.
+- **Pick your exit country**, or rule some out.
+- **New circuit** in one click — open tabs move to it too, not just new ones.
+- **A leak check** you run when you want proof it's working.
+- **Bridges** for networks that block Tor: copy, paste, done.
+- **Notifications** only when something needs you, through Omarchy's own.
 
-Then the release's own `setup` takes over and says everything it touches as it
-goes. For the record, that's: `tor` installed,
-`tormarchy` and `tormarchyd` copied to `/usr/local/bin`, a config snippet in
-`/etc/tor/torrc.d/`, one line added to `/etc/tor/torrc`, a polkit rule so the
-toggle doesn't ask for a password, your user added to the `tor` group,
-`/var/lib/tor` loosened to `0750` so it can read Tor's control cookie, and Tor
-added to the Omarchy menu. Every one of those files is inside the verified
-binary; nothing is read from the plugin's own folder. It doesn't touch your
-Firefox or browser profiles — browser mode makes its own.
-
-The polkit rule covers only the commands that change routing — connect,
-disconnect, mode, exit, bridge, panic and the browser lock — each pinned by name.
-Anything else asks for your password, and nothing it covers runs a program you
-name.
-
-The password goes through polkit's own always-ask rule, the same check `sudo`
-makes: the passwordless rule above never covers setup.
-
-After updating the plugin, the panel shows **Update helper**: the helper is only
-replaced by `setup`, and that button runs it again the same way.
-
-## How it's built
-
-Two small Rust programs and a little QML.
-
-| | |
-|---|---|
-| `tormarchy` | The command line, and the only thing that runs as root — briefly, through polkit or `sudo`, for the commands listed above. |
-| `tormarchyd` | Runs as you, started by the shell for the panel. It holds one connection to Tor's control port and is *told* when something changes — a bootstrap step, a new circuit — instead of asking every few seconds. It decides everything the panel shows. |
-| The QML | Draws what `tormarchyd` says and sends back what you click. |
-
-## Removing it
-
-```bash
-sudo tormarchy uninstall
-omarchy plugin remove tripleu.tor
-```
-
-`uninstall` puts all of the above back, including `/var/lib/tor` and the menu,
-and takes the firewall rules down first so you can't end up without a network.
-Add `--purge` to also drop the `tor` package and your group membership.
+<table>
+  <tr>
+    <td align="center"><img src="assets/screenshots/panel.png" alt="The panel, connected, exit pinned to Germany"><br><sub>Connected</sub></td>
+    <td align="center"><img src="assets/screenshots/leak-check.png" alt="The leak check, every check passed"><br><sub>Leak check</sub></td>
+    <td align="center"><img src="assets/screenshots/bridges.png" alt="A paste of bridges, previewed before use"><br><sub>Bridges</sub></td>
+  </tr>
+</table>
 
 ## Modes
 
 | | |
 |---|---|
-| **Maximum** | Everything through Tor. Local network dropped too. |
-| **Standard** | Everything through Tor, but printers, SSH and Syncthing still work. |
-| **Browser only** | Nothing system-wide. Launches a browser that can't reach anything except Tor. |
+| **Maximum** | Everything through Tor. Local network blocked too. |
+| **Standard** | Everything through Tor, but printers, SSH and Syncthing on your LAN still work. |
+| **Browser only** | Nothing system-wide. Opens a browser that can reach nothing but Tor. |
 
-Standard trusts your local network: anything on it is reached directly. That
-includes a proxy, so a program told to use one on your LAN goes out through it
-as you. On a network you don't control, use Maximum.
+On a network you don't trust, use Maximum: Standard reaches your local network
+directly.
 
-Maximum and Standard also switch off IPv6 (loopback excepted, so things on `::1`
-keep working) and refuse to forward traffic, so a VM or container can't route
-around the rules. Disconnecting puts IPv6 back exactly as it was, interface by
-interface.
-
-Browser only doesn't just set a proxy preference — a proxy setting is a request
-that WebRTC and QUIC happily ignore. `tormarchy browser` starts the browser in a
-systemd scope of its own and, before the browser runs, adds a firewall rule for
-that scope: loopback only, so the SOCKS proxy and nothing else. If the rule can't
-go on, the browser doesn't start. Each launch is its own instance with its own
-profile, so it never hands the window to a copy of the browser you already had
-open. Firefox, Chromium-family browsers and qutebrowser are covered; anything
-else gets the proxy variables and has to be closed first.
-
-## What it costs
-
-- **No UDP.** Video calls, WireGuard, most games.
-- **No IPv6.**
-- **No forwarding**, so VMs and containers lose their network.
-- **No other VPN** at the same time.
-- **No NTP**, so a very long session can drift its clock until Tor gives up.
-
-Browser only avoids all of that.
-
-And the obvious one: Tor changes where your traffic comes from, not who a site
-already knows you are. If you were logged in before you connected, you're still
-logged in.
-
-## Panel
+## The icon
 
 <p align="center">
-  <img alt="The panel, connected" width="62%" src="assets/screenshots/panel.png">
+  <img alt="The bar icon: on, connecting, browser only, off, kill switch holding" width="60%" src="assets/screenshots/bar.png">
 </p>
 
-Left click opens it, right click toggles, middle click gets a new circuit. Hover
-it for the status in words.
+On · connecting · browser only · off · **red** means Tor stopped and the kill
+switch is holding your network shut — toggle off to get it back.
 
-Inside: `j`/`k` to move, `t` toggle, `n` new circuit, `e` exit country,
-`s` measure latency, `d` leak check, `b` bridges, `r` refresh, `esc` to close.
-Hover a hop in the circuit for the relay behind it — name, speed, and what the
-network trusts it with.
+Left click opens the panel, right click toggles, middle click is a new circuit.
 
-The onion in the bar says where you are:
+## Good to know
 
-<p align="center">
-  <img alt="The bar icon on, connecting, browser-only, off, and with the kill switch holding" width="60%" src="assets/screenshots/bar.png">
-</p>
+While connected there's **no UDP** (video calls, WireGuard, most games), **no
+IPv6**, **no VMs or containers online**, and **no other VPN**. Browser only
+avoids all of that.
 
-| | |
-|---|---|
-| Rings and core lit | Everything is going through Tor. |
-| Core pulsing | Connecting. Nothing moves until Tor has bootstrapped and a real request has made it through, so switching on is a blip, not a drop. |
-| Core lit, rings dim | Browser only, with Tor up. The rest of the machine isn't routed. |
-| Rings only, dim | Off. |
-| Red | Tor stopped while you were connected, so the kill switch is holding the network shut. Turn it off to get it back. |
+Tor changes where your traffic comes from, not who you are. If you were logged
+in somewhere before connecting, you still are.
 
-The switch can be turned off while it's still connecting, which cancels the
-connection.
+**If it ever gets stuck,** toggle it off, or run `tormarchy panic`. A reboot
+always brings your network back — nothing survives it unless you turn on
+`tormarchy boot enable`.
 
-### Leak check
+## Remove it
 
-<p align="center">
-  <img alt="The leak check, every check passed" width="52%" src="assets/screenshots/leak-check.png">
-</p>
+Run `sudo tormarchy uninstall`, then `omarchy plugin remove tripleu.tor`.
+Everything is put back, and the firewall rules come down first so you're never
+left offline. Add `--purge` to also drop the `tor` package and your membership
+of the `tor` group, which a plain uninstall leaves in place.
 
-The panel's answer to "is this actually working?". It asks check.torproject.org
-whether you're coming from Tor, tries to reach an IPv6 host directly (which
-should fail), and checks DNS, forwarding and your clock — the same checks as
-`tormarchy doctor`, listed one per line. In browser-only it checks the proxy
-itself.
+---
 
-It only runs when you ask. Each run is real requests to real hosts, and a tool
-that phones out on a timer is a traffic pattern of its own. Changing anything —
-connecting, switching mode — clears the old result rather than leaving it
-vouching for a setup that's gone.
+<details>
+<summary><b>Keyboard and commands</b></summary>
 
-### Bridges
-
-<p align="center">
-  <img alt="A paste of bridges, previewed before use" width="52%" src="assets/screenshots/bridges.png">
-</p>
-
-If the network you're on blocks Tor, bridges get you in. Get some from
-[bridges.torproject.org](https://bridges.torproject.org/options) or
-[@GetBridgesBot](https://t.me/GetBridgesBot) on Telegram, copy them, and hit
-**Paste bridges**. You'll see what you pasted — how many, which transports, and
-whether this machine can run them — before anything changes. **Use these**
-switches Tor over.
-
-The lines go to `tormarchy` over stdin and nowhere else: never on a command line
-(where any process on the machine could read them), never in a file you point
-it at. Once applied they live in a root-only file; the panel only ever sees the
-count. If you've saved bridges, a connect that stalls retries through them on
-its own.
-
-### Notifications
-
-When something's wrong and you might not be looking at the bar: the kill switch
-engaging (critical, stays until it's dealt with), Tor coming back, a connect
-that fails while the panel's closed. One toast, updated in place, never a pile.
-They go through Omarchy's own notifications, so do-not-disturb applies.
-
-Set `notifications` in the plugin's settings to `all` to also hear about
-connects and the bridge fallback, or `off` for silence.
-
-## Commands
+In the panel: `j`/`k` move, `t` toggle, `n` new circuit, `e` exit country,
+`s` latency, `d` leak check, `b` bridges, `r` refresh, `esc` close.
 
 | | |
 |---|---|
 | `tormarchy connect` / `disconnect` | On and off. `--dry-run` prints the firewall rules without applying them. |
-| `tormarchy mode strict` | Switch mode. Stays on if it was on. |
+| `tormarchy mode strict` | Switch mode, live if connected. |
 | `tormarchy status` | What's happening. |
-| `tormarchy ip` | Your circuit and exit, straight from Tor. Doesn't phone anyone to ask. |
+| `tormarchy ip` | Your circuit and exit, straight from Tor. |
 | `tormarchy newnym` | New circuit. |
 | `tormarchy exit de` | Leave from Germany. `--list` shows what's available, `auto` lets Tor pick. |
-| `tormarchy exit --exclude us,ru` | Never leave from these. Tor still picks from everywhere else, which keeps far more of the network than pinning one. `none` clears it. |
-| `tormarchy bridge set < bridges.txt` | For networks that block Tor. `check` previews lines without changing anything, `on`/`off` switches saved ones. |
-| `tormarchy browser` | Launch a browser the firewall locks to Tor. `--list` shows what it found. |
-| `tormarchy doctor` | Check for leaks. `--json` for scripts. |
-| `tormarchy boot enable` | Reconnect at boot if Tor was on when you shut down. Off by default. |
-| `tormarchy menu add` | Tor in the Omarchy menu. `setup` does this; `menu remove` takes it out. |
-| `tormarchy panic` | Rip out every rule and stop Tor. For when things go wrong. |
-| `tormarchy version` | Which release is installed. |
+| `tormarchy exit --exclude us,ru` | Never leave from these. `none` clears it. |
+| `tormarchy bridge set < bridges.txt` | Bridges from a file. `check` previews, `on`/`off` switches saved ones. |
+| `tormarchy browser` | A browser the firewall locks to Tor. `--list` shows what it found. |
+| `tormarchy doctor` | Leak check. `--json` for scripts. |
+| `tormarchy boot enable` | Reconnect at boot if Tor was on at shutdown. Off by default. |
+| `tormarchy menu add` / `remove` | Tor in the Omarchy menu (setup adds it). |
+| `tormarchy panic` | Remove every rule and stop Tor. |
 
-Tab completion for all of it, bash and zsh, installed by `setup`.
+Bash and zsh completion come with setup.
 
-## Shortcuts
+</details>
 
-Keys are yours to pick, so these aren't added for you. A key for the panel and
-one for the toggle, in `~/.config/hypr/bindings.lua`:
+<details>
+<summary><b>Shortcuts and the Omarchy menu</b></summary>
+
+Keys are yours to pick. For example, in `~/.config/hypr/bindings.lua`:
 
 ```lua
 o.bind("SUPER + CTRL + SHIFT + T", "Tor", "omarchy-shell tripleu.tor toggle")
 o.bind("SUPER + CTRL + SHIFT + O", "Toggle Tor", "omarchy-shell tripleu.tor toggleTor")
 ```
 
-Plain commands on purpose, since they work on every Omarchy 4. The `{ panel = … }`
-shorthand is newer than the 4.0 releases, and `{ ipc = "..." }` splits its
-target at the first dot, which `tripleu.tor` has.
+Setup adds **Trigger › Toggle › Tor** (ticked while connected) and a
+**Trigger › Tor** submenu to `~/.config/omarchy/extensions/omarchy-menu.jsonc`,
+between two marker comments. Nothing else in that file is touched.
 
-## In the Omarchy menu
+</details>
 
-`setup` adds **Trigger › Toggle › Tor**, ticked while you're connected, and a
-**Trigger › Tor** submenu: connect or disconnect, new circuit, the panel, the leak
-check and bridges. Omarchy gives plugins no menu of their own, so these live in
-your `~/.config/omarchy/extensions/omarchy-menu.jsonc`, between two marker
-comments. Nothing else in that file is touched, a symlinked one stays a symlink,
-and `tormarchy menu remove` takes them back out.
+<details>
+<summary><b>Leak check, bridges and notifications in detail</b></summary>
 
-## If it breaks
+**Leak check** asks check.torproject.org whether you're on Tor, tries to reach
+an IPv6 host directly (which should fail), and checks DNS, forwarding and your
+clock — the same as `tormarchy doctor`. It only runs when you ask: a tool that
+phones out on a timer is a traffic pattern of its own.
 
-If Tor dies while you're connected, the rules stay and your network goes with
-them. That's on purpose — a kill switch that fails open isn't one. Toggle it off,
-or run `tormarchy panic`.
+**Bridges:** get some from [bridges.torproject.org](https://bridges.torproject.org/options)
+or [@GetBridgesBot](https://t.me/GetBridgesBot), copy them, press **Paste
+bridges**. You see how many, which transports, and whether this machine can run
+them before anything changes. They travel over stdin only, never a command line,
+and are stored root-only. Some transports want `obfs4proxy` (AUR) or `meek`;
+the panel says which.
 
-Nothing survives a reboot, so restarting always gets your network back.
+**Notifications:** the kill switch engaging, Tor coming back, a connect that
+fails while the panel is closed. One toast, updated in place. Set
+`notifications` to `all` for more, or `off` for none.
 
-That's also why `tormarchy boot enable` is opt-in rather than the default —
-turning it on trades a little of that guarantee for not having to reconnect
-after every restart. It only reconnects if Tor was on when you shut down, comes
-back in the mode you were using, and if the network isn't there or Tor can't
-bootstrap it applies no rules at all.
+</details>
+
+<details>
+<summary><b>Security: what setup installs, and why you can trust it</b></summary>
+
+Setup downloads the release for your plugin version and checks its
+[Sigstore](https://www.sigstore.dev/) signature before anything runs as root: it
+must have been built by this repository's own release workflow, on `master`, at
+the exact commit the version's tag names on GitHub. There's no signing key to
+steal. If it doesn't verify, nothing is installed.
+
+The password dialog uses polkit's own wording — it asks to run
+`~/.config/omarchy/plugins/tripleu.tor/setup` as the super user. That's
+polkit's always-ask rule, the same check `sudo` makes. Prefer a terminal?
+`sudo ~/.config/omarchy/plugins/tripleu.tor/setup` does the same.
+
+It installs: `tor`, `tormarchy` and `tormarchyd` in `/usr/local/bin`, a snippet
+in `/etc/tor/torrc.d/` plus one include line in `/etc/tor/torrc`, a polkit rule
+so the switch doesn't ask for a password, your user in the `tor` group,
+`/var/lib/tor` at `0750` so the control cookie is readable, completion, and the
+menu entries. Every file comes from inside the verified binary. Your browser
+profiles are never touched.
+
+The polkit rule covers only connect, disconnect, mode, exit, bridge, panic and
+the browser lock, each pinned by name. Nothing it covers runs a program you
+name. Browser only isn't a proxy setting either: the browser runs in its own
+systemd scope with a firewall rule allowing loopback only, so WebRTC and QUIC
+can't slip past.
+
+After a plugin update the panel shows **Update helper**, which runs setup again
+the same way.
+
+</details>
+
+<details>
+<summary><b>How it's built</b></summary>
+
+Two small Rust programs and a little QML.
+
+| | |
+|---|---|
+| `tormarchy` | The command line, and the only part that runs as root — briefly, through polkit or `sudo`. |
+| `tormarchyd` | Runs as you. Holds one connection to Tor's control port and is told when something changes, instead of polling. Decides everything the panel shows. |
+| The QML | Draws what `tormarchyd` says and sends back your clicks. |
+
+</details>
 
 ## License
 
-MIT
-
-Not affiliated with or endorsed by the Tor Project.
+MIT. Not affiliated with or endorsed by the Tor Project.
