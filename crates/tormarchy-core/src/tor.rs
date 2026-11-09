@@ -558,3 +558,100 @@ s Exit Fast Running Valid
         );
     }
 }
+
+#[cfg(test)]
+mod socket_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    /// A control port on a real socket: answers AUTHENTICATE, a full-size
+    /// consensus (finished or cut off), and ip-to-country lookups.
+    fn fake_tor(relays: usize, finish: bool) -> (Endpoint, std::path::PathBuf) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for conn in l.incoming() {
+                let Ok(mut s) = conn else { break };
+                let reader = BufReader::new(s.try_clone().unwrap());
+                let mut out = Vec::new();
+                for line in reader.lines() {
+                    let Ok(line) = line else { break };
+                    if line.starts_with("QUIT") {
+                        break;
+                    } else if line.starts_with("AUTHENTICATE") {
+                        s.write_all(b"250 OK\r\n").unwrap();
+                    } else if line.starts_with("GETINFO ns/all") {
+                        out.extend_from_slice(b"250+ns/all=\r\n");
+                        for i in 0..relays {
+                            let ip = if i == relays - 1 {
+                                "10.9.9.9"
+                            } else {
+                                "10.0.0.1"
+                            };
+                            out.extend_from_slice(
+                                format!("r relay{i} AAAA BBBB 2026-11-09 00:00:00 {ip} 9001 0\r\ns Exit Fast Guard HSDir Running Stable V2Dir Valid\r\nw Bandwidth=1000\r\n").as_bytes(),
+                            );
+                        }
+                        if finish {
+                            out.extend_from_slice(b".\r\n250 OK\r\n");
+                        }
+                    } else if let Some(keys) = line.strip_prefix("GETINFO ") {
+                        for k in keys.split_whitespace() {
+                            let ip = k.trim_start_matches("ip-to-country/");
+                            let cc = if ip == "10.9.9.9" { "zz" } else { "de" };
+                            out.extend_from_slice(format!("250-{k}={cc}\r\n").as_bytes());
+                        }
+                        out.extend_from_slice(b"250 OK\r\n");
+                    }
+                }
+                if finish {
+                    out.extend_from_slice(b"250 closing connection\r\n");
+                }
+                let _ = s.write_all(&out);
+            }
+        });
+        let dir = crate::sys::create_temp_dir("tm-ctl-").unwrap();
+        std::fs::write(dir.join("cookie"), [7u8; 32]).unwrap();
+        (
+            Endpoint {
+                port,
+                cookies: vec![dir.join("cookie")],
+            },
+            dir,
+        )
+    }
+
+    #[test]
+    fn a_full_size_consensus_is_read_to_its_end() {
+        let (ep, dir) = fake_tor(8000, true);
+        assert_eq!(
+            exit_countries(&ep).unwrap(),
+            ["de", "zz"],
+            "the last relay's country is listed"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_consensus_cut_off_before_its_end_is_refused() {
+        let (ep, dir) = fake_tor(8000, false);
+        let err = exit_countries(&ep).unwrap_err();
+        assert!(err.contains("incomplete"), "{err}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_poll_limit_still_applies_to_everything_else() {
+        let (ep, dir) = fake_tor(8000, true);
+        let r = control::query(
+            &ep,
+            &["GETINFO ns/all".into()],
+            control::REPLY_LIMIT,
+            Duration::from_secs(10),
+        );
+        assert!(matches!(r, Err(control::Error::TooLarge)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

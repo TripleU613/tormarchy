@@ -23,11 +23,17 @@ function check(ok, what) {
   if (!ok) failures++;
 }
 
-// The menu functions, run without the dispatcher and without the root check,
-// against a home directory of the test's own.
+// The real binary, as the person whose menu it is. Under root -- CI's checks
+// run as root for nft -- it is run as nobody, since menu refuses to write a home
+// as root; the test's home directory is handed to that account.
+const bin = process.env.TORMARCHY_BIN || path.join(repo, "target", "debug", "tormarchy");
 function tormarchy(home, verb) {
-  const script = `source <(sed -n '/^# -* constants --$/,/^# -* dispatch --$/p' tormarchy); menu_write ${verb}`;
-  return spawnSync("bash", ["-c", script], { cwd: repo, env: { ...process.env, HOME: home }, encoding: "utf8" });
+  const env = { PATH: process.env.PATH, HOME: home };
+  if (process.getuid && process.getuid() === 0) {
+    spawnSync("chown", ["-R", "nobody", home]);
+    return spawnSync("runuser", ["-u", "nobody", "--", "env", `HOME=${home}`, bin, "menu", verb], { encoding: "utf8", env });
+  }
+  return spawnSync(bin, ["menu", verb], { env, encoding: "utf8" });
 }
 
 function home() {
