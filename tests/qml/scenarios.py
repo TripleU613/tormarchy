@@ -176,6 +176,21 @@ check(len(sent) == 1 and headline(sent[0]) == "Connected through Tor" and "Germa
       "with notifications set to all, a connect is announced with its exit country")
 svc.deleteLater()
 
+# An Omarchy without the sender. Quickshell reports a program it cannot find
+# as neither a start nor an exit, so the exit code the panel used to wait for
+# never came, and every later change logged another failed start.
+os.environ["TORMARCHY_STUB_MISSING"] = "omarchy-notification-send"
+svc = service(fixture("on"))
+poll(svc, fixture("blocked"))
+pretend_blocked_for_a_while(svc)
+poll(svc, fixture("blocked"))
+check(len(toasts()) == 1 and svc.property("notificationsAvailable") is False,
+      "a sender that is not installed is noticed the first time it fails to start")
+poll(svc, fixture("on"))
+check(len(toasts()) == 1, "and is not tried again for the next change")
+svc.deleteLater()
+del os.environ["TORMARCHY_STUB_MISSING"]
+
 os.environ["TORMARCHY_STUB_CONNECT_EXIT"] = "1"
 svc = service(fixture("off"))
 QMetaObject.invokeMethod(svc, "toggleConnected")

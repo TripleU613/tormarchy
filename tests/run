@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# One entry point for the portable checks: the same script CI runs, so green
+# here is green there. Run under sudo to also validate the nftables ruleset
+# against the kernel. The Qt load tests need PySide6 and an Omarchy checkout;
+# they are `make shell`.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+exec .github/scripts/check.sh "$@"

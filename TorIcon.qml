@@ -35,6 +35,15 @@ Item {
   property bool coreVisible: true
   property bool pulsing: false
 
+  // `omarchy toggle animations` turns Hyprland's animations off, and the shell
+  // follows it through Style.reduceMotion. A zero duration alone would leave an
+  // infinite loop spinning, so the pulse stops outright and connecting is shown
+  // by a steady half-lit core instead: still distinct from the full core of a
+  // routed machine and the absent one of an idle one. Both tokens are newer than
+  // the first 4.x releases, which have neither; read that way, motion stays on.
+  readonly property bool reduceMotion: Style.reduceMotion === true
+  function duration(ms) { return typeof Style.duration === "function" ? Style.duration(ms) : ms }
+
   // Whole pixels: a fractional box gets centred onto a half pixel, which
   // antialiases into a soft mark.
   readonly property int size: Math.max(6, Math.round(iconSize))
@@ -101,7 +110,8 @@ Item {
     antialiasing: true
     // Hidden by opacity rather than `visible`, so the painted bounds the bar
     // centres on stay the same in every state and the mark never shifts.
-    opacity: !root.coreVisible ? 0 : (root.pulsing ? pulse.level : 1)
+    opacity: !root.coreVisible ? 0
+      : (!root.pulsing ? 1 : (root.reduceMotion ? 0.5 : pulse.level))
 
     QtObject {
       id: pulse
@@ -109,11 +119,11 @@ Item {
     }
 
     SequentialAnimation {
-      running: root.pulsing && root.coreVisible
+      running: root.pulsing && root.coreVisible && !root.reduceMotion
       loops: Animation.Infinite
       onRunningChanged: if (!running) pulse.level = 1
-      NumberAnimation { target: pulse; property: "level"; from: 1; to: 0.25; duration: 650; easing.type: Easing.InOutSine }
-      NumberAnimation { target: pulse; property: "level"; from: 0.25; to: 1; duration: 650; easing.type: Easing.InOutSine }
+      NumberAnimation { target: pulse; property: "level"; from: 1; to: 0.25; duration: root.duration(650); easing.type: Easing.InOutSine }
+      NumberAnimation { target: pulse; property: "level"; from: 0.25; to: 1; duration: root.duration(650); easing.type: Easing.InOutSine }
     }
   }
 }

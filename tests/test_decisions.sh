@@ -274,6 +274,16 @@ reject "no ShellIpc, which released Omarchy does not have" Panel.qml "ShellIpc {
 reject "no layer of the mark is placed against its own size" TorIcon.qml "(root.size - width) / 2"
 want "the size falls back where the shell has no bar icon size" Panel.qml "Style.bar.iconSize || "
 
+# With `omarchy toggle animations` off the shell sets Style.reduceMotion, and a
+# looping animation must stop rather than spin at zero duration. Both tokens
+# are newer than Omarchy 4.0.x, so every read of them is guarded.
+want "the bar pulse stops under reduced motion" TorIcon.qml "root.pulsing && root.coreVisible && !root.reduceMotion"
+want "and connecting still reads as a half-lit core" TorIcon.qml "root.reduceMotion ? 0.5 : pulse.level"
+want "the gauge's spinner stops under reduced motion" SpeedGauge.qml "running: root.busy && !root.reduceMotion"
+for f in TorIcon.qml SpeedGauge.qml; do
+  want "$f reads Style.duration only where the shell has it" "$f" 'typeof Style.duration === "function"'
+done
+
 # A third-party plugin's shell facade only summons the plugin's own id. The
 # speed test summon was always refused, after closing the panel first.
 reject "no summon of another plugin's panel" Panel.qml 'summon("omarchy.'
@@ -286,6 +296,8 @@ echo "Escapes and disconnections"
 # not locked at all. The lock is an nftables rule on the scope's cgroup instead.
 reject "browser-only does not rely on IPAddressDeny" tormarchy "--property=IPAddressDeny"
 want "browser-only is locked by cgroup in nftables" tormarchy 'socket cgroupv2 level'
+reject "uninstall does not disable a tor it never enabled" tormarchy 'systemctl disable tor.service'
+reject "setup does not enable tor at boot behind anyone's back" tormarchy 'systemctl enable tor.service'
 want "the browser is not started if the lock fails" tormarchy 'could not lock the browser to Tor, so it was not started'
 # A running Chromium handed a new window opens it in the existing, unproxied
 # process. Its own profile forces an instance of its own.

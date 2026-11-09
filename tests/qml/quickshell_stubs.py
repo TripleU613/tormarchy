@@ -231,6 +231,15 @@ def _proc_set_running(self, v):
 def _proc_start(self):
     if not _proc_get_running(self):
         return
+    # A program that is not installed, the way Quickshell reports one: no
+    # started, no exited, only running falling back to false.
+    missing = os.environ.get("TORMARCHY_STUB_MISSING", "")
+    argv = [str(c) for c in (getattr(self, "_command", []) or [])]
+    if missing and argv[:1] == [missing]:
+        COMMAND_LOG.append(argv)
+        self._running = False
+        self.runningChanged.emit()
+        return
     self.started.emit()
     # With stdin open the process waits for its input to end, as a real one
     # reading to EOF would; closing stdin (stdinEnabled = false) is the EOF.
