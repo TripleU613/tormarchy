@@ -24,6 +24,10 @@ Then click the onion in the bar and press **Set up**. Omarchy asks for your
 password once, Tor and the helper are installed, and a notification says when
 it's ready. After that the switch never asks again.
 
+The dialog uses polkit's own wording: it asks to run
+`~/.config/omarchy/plugins/tripleu.tor/setup` as the super user. That's this
+plugin's `setup`, and it's expected.
+
 Prefer a terminal? `sudo ~/.config/omarchy/plugins/tripleu.tor/setup` does the
 same thing.
 
