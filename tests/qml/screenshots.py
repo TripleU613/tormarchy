@@ -8,7 +8,8 @@ Screenshots taken by hand go stale with every change and are taken on whatever
 theme and font the person happened to run. These come from the fixtures, at
 twice the size so edges stay sharp, in Omarchy's default theme and font:
 
-    assets/screenshots/panel.png        connected
+    assets/screenshots/setup.png        before setup: the one button
+    assets/screenshots/panel.png        connected, with an exit country pinned
     assets/screenshots/leak-check.png   the leak check, run
     assets/screenshots/bridges.png      a bridge paste, previewed
     assets/screenshots/bar.png          the bar icon in each state
@@ -18,6 +19,7 @@ Needs PySide6, an Omarchy checkout, and JetBrains Mono installed. Pass the Nerd
 Font symbols with --font unless a JetBrainsMono Nerd Font is installed.
 """
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -77,10 +79,33 @@ def view(name):
     return os.path.join(FIXTURES, f"view-{name}.json")
 
 
+def pinned(name):
+    """A fixture with the exit pinned to the country its circuit already leaves
+    from, so the picker reads as a choice made rather than a default -- and,
+    for the pictures, a leak check with every line passed, the way a healthy
+    machine reads. The test fixtures keep their warning."""
+    with open(view(name)) as f:
+        data = json.load(f)
+    v = data["view"]
+    v["exitValue"] = "de"
+    leak = v.get("leak", {})
+    checks = leak.get("checks", [])
+    if checks:
+        ok = next(c["glyph"] for c in checks if c["status"] == "pass")
+        for c in checks:
+            c["status"], c["glyph"] = "pass", ok
+        leak.update(glyph=ok, failed=False, subtitleError=False,
+                    subtitle=f"{len(checks)} passed \u00b7 just now")
+    path = os.path.join(work, f"view-{name}-pinned.json")
+    with open(path, "w") as f:
+        json.dump(data, f)
+    return path
+
 # The daemon's own views for each state: tests/qml/fixtures holds what it sends.
 shots = {
-    "panel": render("panel", "--view", view("on")),
-    "leak-check": render("leak-check", "--view", view("leak-pass"), "--expand", "leaks"),
+    "setup": render("setup", "--view", view("not-installed")),
+    "panel": render("panel", "--view", pinned("on")),
+    "leak-check": render("leak-check", "--view", pinned("leak-pass"), "--expand", "leaks"),
     "bridges": render("bridges", "--view", view("bridges-ok"), "--expand", "bridges"),
 }
 # In the order the README's table lists them.
@@ -199,7 +224,7 @@ features.setPixelSize(22)
 p.setFont(features)
 p.setPen(QColor(palette.get("dark_foreground", palette["foreground"])))
 p.drawText(QRectF(0, logo_y + logo_h + 98, card_x, 34), Qt.AlignCenter,
-           "kill switch · leak check · bridges · exit picker")
+           "one-click setup · kill switch · leak check · bridges")
 p.end()
 preview.save(args.preview)
 print("saved", args.preview)
