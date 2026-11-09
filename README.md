@@ -1,14 +1,9 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="Tormarchy" width="340">
+  <img src="preview.png" alt="Tormarchy: Tor for the Omarchy bar. The panel open under its icon in the bar" width="100%">
 </p>
 
 <p align="center">
-  <b>Tor for the Omarchy bar.</b><br>
   Click the onion and all your traffic goes through Tor. Click it again, it doesn't.
-</p>
-
-<p align="center">
-  <img src="preview.png" alt="The Tormarchy panel open under its icon in the Omarchy bar" width="100%">
 </p>
 
 ## Install
@@ -22,7 +17,7 @@ password once, and a notification tells you when it's ready. That's it — the
 switch never asks again.
 
 <p align="center">
-  <img src="assets/screenshots/setup.png" alt="Before setup: the wordmark and one Set up button" width="50%">
+  <img src="assets/screenshots/setup.png" alt="Before setup: the wordmark and one Set up button" width="40%">
 </p>
 
 Needs Omarchy 4 on x86_64. Setup installs `tor` for you.
