@@ -1,8 +1,11 @@
 import QtQuick
 import Quickshell.Io
-import qs.Commons
-import "Model.js" as Model
 
+// The plugin's service: one tormarchyd for every monitor's widget. Everything
+// the panel shows is decided in the daemon and arrives here as one JSON view
+// per change; everything the panel asks for goes back as one JSON command. No
+// state machine lives in QML any more -- only the process, its lines, and a
+// restart if it ever exits.
 Item {
   id: root
 
@@ -11,898 +14,118 @@ Item {
   // The shell runs one of these for the plugin and every monitor's widget
   // shares it. A widget also carries its own, for a bar that will not hand it
   // the shared one; that copy is not live while the shared one exists, and an
-  // idle copy reads nothing and runs nothing.
+  // idle copy runs nothing.
   property bool live: true
 
-  // Truth from `tormarchy status --json`.
-  property bool installed: false
-  property bool torRunning: false
-  property bool connected: false
-  property int bootstrap: 0
-  property bool controlPort: true
-  property string mode: ""
-  property string exitIp: ""
-  property string exitCountry: ""
-  property string exitCountryName: ""
-  property string requestedExit: ""
-  property var excludedExits: []
-  property int circuitAgeSec: 0
-  property var path: []
-  // Per hop, when the helper reports it: nickname, flags, bandwidth.
-  property var hops: []
-  property double bytesRead: 0
-  property double bytesWritten: 0
-  property string statusText: "Checking…"
-  property var warnings: []
+  // The daemon's view, or the one shown before it has spoken: also what a
+  // machine without the helper installed sees.
+  readonly property var placeholder: ({
+    installed: false, helperStale: false, statusText: "Tor helpers are not installed", bar: "off",
+    active: false, busy: false, canToggle: false, switchCaption: "OFF", switchCaptionLit: false,
+    mode: "lan", modes: [], exitCaption: "EXIT", exitValue: "auto", exitOptions: [],
+    warning: { short: "", full: "" },
+    latency: { text: "— ms", fraction: 0, measuring: false, caption: "", captionError: false },
+    canNewCircuit: false,
+    stats: { visible: false, hops: [], traffic: "", age: "" },
+    leak: { glyph: "", failed: false, subtitle: "", subtitleError: false, checking: false, hasResult: false, checks: [] },
+    bridges: { state: "off", subtitle: "Off", hasPreview: false, previewText: "", chips: [], invalidLabel: "",
+               message: { short: "", full: "" }, canApply: false, working: false, toggleLabel: "" },
+    error: { short: "", full: "" }, actionStatus: ""
+  })
+  property var view: placeholder
+  readonly property bool installed: view.installed === true
 
-  // Optimistic connect state so the UI reacts the instant you click, rather
-  // than waiting for a bootstrap that can take ten seconds. _desired is -1
-  // while we just follow the real state, or 0/1 while a toggle catches up.
-  property int _desired: -1
+  // Our own directory, for the daemon to compare its version with the plugin's.
+  readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/$/, "")
 
-  // What "on" means depends on the mode. With a ruleset it is the rules being
-  // present. Browser-only installs none by design, so `connected` is false there
-  // forever -- which left the switch stuck on OFF with Tor plainly running, and
-  // made clicking it call connect again instead of disconnect, so browser-only
-  // could not be turned off from the panel at all. In that mode the honest
-  // answer to "is it on" is whether tor itself is up.
-  readonly property bool liveConnection: effectiveMode === "socks" ? torRunning : connected
-  readonly property bool active: _desired === -1 ? liveConnection : (_desired === 1)
-  // Only from a figure tor actually gave. With the control port unreachable the
-  // bootstrap reads 0 whatever tor is doing, and treating that as bootstrapping
-  // held browser-only at "0%" with no circuit allowed, indefinitely.
-  readonly property bool bootstrapping: torRunning && !connected && controlPort && bootstrap < 100
-  property bool refreshing: false
-  property string actionStatus: ""
-  property string lastError: ""
-
-  // Latency through the circuit. Measured on a timer, but only while the panel
-  // is actually on screen -- see `watching`.
-  //
-  // Each measurement is a real HTTPS round trip over Tor, so this is not polled
-  // like the status is: relay bandwidth is donated, and a reading nobody is
-  // looking at is pure waste. Gating on the panel being open is what makes
-  // continuous measurement reasonable rather than rude.
-  //
-  // It deliberately does NOT run while the panel is closed. A request to a
-  // fixed host at a fixed interval, forever, is a traffic pattern -- a regular
-  // beacon with a recognisable shape, which is the last thing a Tor tool should
-  // add on the user's behalf without being asked.
-  //
-  // Counted, because every monitor's panel shares this Service: one closing
+  // Counted, because every monitor's panel shares this service: one closing
   // must not stop what another is still showing.
   property int watchers: 0
-  readonly property bool watching: watchers > 0
-  function watch(on) { watchers = Math.max(0, watchers + (on ? 1 : -1)) }
-  // Seconds between readings on the live stream. Small numbers are affordable
-  // now: each tick is one round trip on a connection that is already open, not
-  // a fresh circuit handshake.
-  readonly property int speedIntervalSec: intSetting("speedIntervalSec", 3, 1, 60)
-
-  property int latencyMs: 0
-  property bool measuringSpeed: false
-  property string speedError: ""
-
-  // Every measurement taken this session, capped to what the sparkline shows.
-  property var latencyHistory: []
-
-  // The moment the circuit is no longer carrying traffic -- the toggle went off,
-  // or the daemon stopped -- the last reading becomes a claim about a path that
-  // no longer exists. Drop it so the gauge empties to "— ms" at once rather than
-  // freezing on a stale number beside an OFF switch.
-  onCircuitReadyChanged: {
-    if (!circuitReady) {
-      latencyMs = 0
-      latencyHistory = []
-      speedError = ""
-      measuringSpeed = false
-    }
+  function watch(on) {
+    watchers = Math.max(0, watchers + (on ? 1 : -1))
+    send({ cmd: "watch", on: !!on })
+    // Opening the panel is also when a helper installed since is noticed.
+    if (on && live && !daemon.running) restart.restart()
   }
 
-  // Bridges: "active" | "stashed" | "off", from the status poll, plus what the
-  // bridge tool last read about them (transport names and counts, never lines).
-  property string bridgeState: "off"
-  property var bridgeDetail: null
-
-  // A paste on its way in: read from the clipboard, previewed by `bridge check`,
-  // applied by `bridge set`. The text is only ever in memory and goes to
-  // tormarchy over stdin -- never argv, where every process on the machine can
-  // read it, and never a file -- and it is dropped on apply, on cancel, and
-  // whenever the panel closes.
-  property var bridgePreview: null
-  property string bridgeMessage: ""
-  readonly property bool bridgeWorking: (!!clipboardProcess && clipboardProcess.running)
-    || (!!bridgeCheckProcess && bridgeCheckProcess.running)
-    || (!!bridgeSetProcess && bridgeSetProcess.running)
-  property string _pendingBridgeText: ""
-
-  // The leak check. Run only when asked, never on a timer: each run makes real
-  // requests -- check.torproject.org, and a deliberate attempt to reach an IPv6
-  // host directly -- and the same rule as the latency gauge applies. Traffic
-  // nobody asked for is a pattern this tool should not add on anyone's behalf.
-  // The helper the panel runs is the copy setup put in /usr/local/bin, and a
-  // plugin update does not touch it: without setup again, a new plugin talks to
-  // an old helper, and every change that lives in the helper never arrives.
-  // Compared byte for byte with the one this plugin ships.
-  property string bundledHelper: String(Qt.resolvedUrl("tormarchy")).replace(/^file:\/\//, "")
-  property bool helperStale: false
-  function checkHelper() {
-    if (helperCheckProcess.running || bundledHelper === "" || !installed) return
-    helperCheckProcess.command = ["bash", "-c", "cmp -s -- \"$1\" \"$(command -v tormarchy)\"",
-                                  "check-helper", bundledHelper]
-    helperCheckProcess.running = true
-  }
-  onInstalledChanged: checkHelper()
-  onBundledHelperChanged: checkHelper()
-
-  property bool checkingLeaks: false
-  property var leakResult: null
-  property double leakCheckedAtMs: 0
-  property string leakError: ""
-
-  // Countries Tor currently has usable exit relays in. Loaded on demand, not
-  // polled: it costs a walk of the whole consensus, and it barely changes.
-  property var exitCountries: []
-  property bool loadingExitCountries: false
-  property bool exitCountriesLoaded: false
-
-  readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 5, 2, 300)
-  readonly property string defaultMode: Model.isValidMode(setting("mode", "lan")) ? String(setting("mode", "lan")) : "lan"
-  // The mode to show selected: the live one when we have it, else the setting.
-  readonly property string effectiveMode: mode !== "" ? mode : defaultMode
-
-  // True only while a connect/disconnect/mode action is actually in flight.
-  // Deliberately does NOT fold in the routine status poll: that fires every
-  // second or two and each call makes real control-port round trips, so folding
-  // it in here flashed the toggle's spinner and made it briefly refuse clicks on
-  // every refresh -- an intermittent "the switch didn't take" that had nothing
-  // to do with any action. `refreshing` already covers the poll for anything
-  // that genuinely wants to know a status read is happening.
-  // Guarded because bindings are re-evaluated while the Service is torn down --
-  // every plugin reload -- after the processes are already gone, and an
-  // unguarded read logs a TypeError into the shell's log each time.
-  readonly property bool busy: (!!actionProcess && actionProcess.running) || (!!cancelProcess && cancelProcess.running)
-    || (!!bridgeSetProcess && bridgeSetProcess.running)
-
-  // A connect spends most of its life waiting for tor to bootstrap -- up to two
-  // minutes, four if it falls back to bridges -- and the switch refused every
-  // click for all of it, so there was no way to change your mind. Turning it
-  // off during that wait now cancels: disconnect stops tor, connect sees tor go
-  // and gives up without applying anything.
-  readonly property bool canToggle: !busy
-    || (!!actionProcess && actionProcess.running && _desired === 1 && !!cancelProcess && !cancelProcess.running)
-
-  // Whether there is a circuit worth measuring. Two things have to agree: the
-  // switch says on (`active`, so flipping it off stops the gauge that same
-  // instant rather than when the daemon finally exits), and the connection is
-  // really up rather than merely asked for. Gating on raw torRunning is what
-  // left a millisecond reading ticking under an OFF switch; leaving the second
-  // half out instead pointed a stream of failing requests at a proxy that cannot
-  // carry them yet, for the whole of a bootstrap that runs up to two minutes.
-  readonly property bool circuitReady: torRunning && active && !bootstrapping
-    && (effectiveMode === "socks" || connected)
-
-  // NEWNYM goes over the control port and needs no ruleset, so a new circuit is
-  // available in browser-only too -- it was greyed out there purely because it
-  // was gated on `connected`, which that mode never sets.
-  //
-  // Both of these carry !bootstrapping for the same reason: there is no circuit
-  // to measure or replace until one exists. In the routed modes `connected`
-  // already implies it, so this only changes browser-only, which reaches a
-  // working proxy well after the command that started it has returned.
-  readonly property bool canNewCircuit: torRunning && active && !bootstrapping
-
-  // A status read is several control-port round trips, so one is often still in
-  // flight when a connect or disconnect finishes. Applying it afterwards
-  // repainted the panel from before the action -- a live circuit, its full path
-  // and "All traffic through Tor" sitting under a switch that already read OFF,
-  // until the next poll happened to correct it. Every read carries the action
-  // epoch it started in; a reply from an earlier epoch describes a machine that
-  // no longer exists and is dropped.
-  property int _actionEpoch: 0
-  property int _statusEpoch: 0
-
-  property string _statusOutput: ""
-  property string _statusError: ""
-  property string _actionOutput: ""
-  property string _actionError: ""
-  property string _exitListOutput: ""
-  property string _speedOutput: ""
-
-  function setting(name, fallback) {
-    var value = settings ? settings[name] : undefined
-    return value === undefined || value === null ? fallback : value
+  function send(command) {
+    if (!started) return
+    daemon.write(JSON.stringify(command) + "\n")
   }
 
-  function intSetting(name, fallback, min, max) {
-    var n = parseInt(String(setting(name, fallback)), 10)
-    if (!isFinite(n)) n = fallback
-    if (n < min) n = min
-    if (n > max) n = max
-    return n
+  function toggle() { send({ cmd: "toggle" }) }
+  function connect() { send({ cmd: "connect" }) }
+  function disconnect() { send({ cmd: "disconnect" }) }
+  function setMode(mode) { send({ cmd: "setMode", mode: String(mode) }) }
+  function newCircuit() { send({ cmd: "newCircuit" }) }
+  function setExit(code) { send({ cmd: "setExit", cc: String(code || "auto") }) }
+  function loadExits() { send({ cmd: "loadExits" }) }
+  function measure() { send({ cmd: "measure" }) }
+  function checkLeaks() { send({ cmd: "checkLeaks" }) }
+  function pasteBridges() { send({ cmd: "pasteBridges" }) }
+  function applyBridges() { send({ cmd: "applyBridges" }) }
+  function cancelBridges() { send({ cmd: "cancelBridges" }) }
+  function setBridges(on) { send({ cmd: "setBridges", on: !!on }) }
+  function refresh() { send({ cmd: "refresh" }) }
+
+  onSettingsChanged: send({ cmd: "settings", settings: settings })
+
+  Component.onCompleted: if (live) daemon.running = true
+  onLiveChanged: {
+    restart.stop()
+    backoffMs = 2000
+    daemon.running = live
   }
 
-  function refresh() {
-    if (statusProcess.running) return
-    _statusOutput = ""
-    _statusError = ""
-    _statusEpoch = _actionEpoch
-    refreshing = true
-    // Via bash so a missing helper is a real exit 127 we can report as
-    // "not installed"; a bare argv would just fail to spawn instead.
-    statusProcess.command = ["bash", "-c", "exec tormarchy status --json"]
-    statusProcess.running = true
-  }
-
-  function applyStatus(raw) {
-    var parsed = Model.parseStatus(raw)
-    if (!parsed.ok) {
-      lastError = parsed.lastError || "Failed to read Tor status"
-      return
-    }
-    installed = parsed.installed
-    torRunning = parsed.torRunning
-    connected = parsed.connected
-    bootstrap = parsed.bootstrap
-    controlPort = parsed.controlPort
-    mode = parsed.mode
-    exitIp = parsed.exitIp
-    exitCountry = parsed.exitCountry
-    exitCountryName = parsed.exitCountryName
-    requestedExit = parsed.requestedExit
-    // Lists only when they change. A fresh array on every poll rebuilds what
-    // is drawn from it: the hops under a pointer, dropping their tooltip, and
-    // the exit picker's rows while someone is scrolling them.
-    if (!_sameList(excludedExits, parsed.excludedExits)) excludedExits = parsed.excludedExits
-    circuitAgeSec = parsed.circuitAgeSec
-    if (!_sameList(path, parsed.path)) path = parsed.path
-    if (!_sameList(hops, parsed.hops)) hops = parsed.hops
-    bytesRead = parsed.bytesRead
-    bytesWritten = parsed.bytesWritten
-    warnings = parsed.warnings
-    // Reality caught up to the pending connect/disconnect — stop overriding.
-    // Compared against liveConnection, not connected: in browser-only the rules
-    // never appear, so a connect measured against `connected` could not ever
-    // match and the optimistic state was only ever dropped by the settle
-    // timeout, which reads as the switch flicking back on its own.
-    if (_desired !== -1 && liveConnection === (_desired === 1)) _desired = -1
-    statusText = parsed.statusText !== "" ? parsed.statusText : Model.stateLabel(root)
-    lastError = ""
-    if (parsed.bridges !== undefined) {
-      var nextBridges = parsed.bridges
-      // Not on the first reading: bridges already on when the shell starts were
-      // switched on some other time, not just now.
-      if (_notifiedState !== "")
-        // Only connect's own fallback is news; any other switch was someone's
-        // deliberate choice, made here or in a terminal.
-        notify(Model.bridgesNotification(bridgeState, nextBridges, notificationPolicy,
-          _bridgeActionPending || !(_actionWasConnect && !!actionProcess && actionProcess.running)))
-      // Only on a change: the detail is a local file read, but it is not part
-      // of the poll and has no business running on every one.
-      var bridgesChanged = nextBridges !== bridgeState || (nextBridges !== "off" && bridgeDetail === null)
-      bridgeState = nextBridges
-      if (bridgesChanged) loadBridgeDetail()
-    }
-    noteConnectionState()
-  }
-
-  function _sameList(a, b) { return JSON.stringify(a) === JSON.stringify(b) }
-
-  // ---- notifications -----------------------------------------------------
-  //
-  // What deserves a toast is decided in Model.js; this only feeds it states and
-  // sends what it returns. Evaluated once a status has been applied in full,
-  // never from a property change handler: the fields land one at a time, and
-  // between "tor stopped" and "rules gone" the half-applied status reads as the
-  // kill switch holding -- a false alarm on every ordinary disconnect.
-  readonly property string notificationPolicy: Model.notificationPolicy(setting("notifications", "problems"))
-  property bool notificationsAvailable: true
-  property string _notifiedState: ""
-  property double _blockedSinceMs: 0
-  property string _toastId: ""
-  property var _queuedNotification: null
-  property bool _bridgeActionPending: false
-
-  function noteConnectionState() {
-    var next = Model.connectionState({
-      installed: installed, connected: connected, torRunning: torRunning,
-      mode: effectiveMode, bootstrapping: bootstrapping
-    })
-    // The first reading after the shell starts is where things stand, not a
-    // change: a machine that boots with the kill switch holding has already
-    // been told, by whatever it was doing when it went down.
-    if (_notifiedState === "") {
-      _notifiedState = next
-      return
-    }
-    if (next === _notifiedState) {
-      _blockedSinceMs = 0
-      return
-    }
-    // tor is briefly not running while it restarts -- a bridge change, an
-    // exit change falling back to a restart -- and that is not the kill switch
-    // holding. Only a "blocked" that is still there a poll later is real.
-    if (next === "blocked") {
-      if (_blockedSinceMs === 0) {
-        _blockedSinceMs = Date.now()
-        return
-      }
-      if (Date.now() - _blockedSinceMs < 4000) return
-    }
-    _blockedSinceMs = 0
-    var n = Model.notificationFor(_notifiedState, next, notificationPolicy, { exitCountryName: exitCountryName })
-    _notifiedState = next
-    notify(n)
-  }
-
-  function notify(n) {
-    if (!n || !notificationsAvailable) return
-    // One at a time, newest wins. Each send replaces the previous toast, so a
-    // burst of changes ends as one toast saying where things now stand.
-    if (notifyProcess.running) {
-      _queuedNotification = n
-      return
-    }
-    notifyProcess.command = Model.notificationArgv(n, _toastId)
-    _notifyStarted = false
-    notifyProcess.running = true
-  }
-
-  // Whether the sender this toast went to actually started. Quickshell reports
-  // a program it cannot find as neither an exit nor a start -- only `running`
-  // falling back to false -- so a missing sender is told apart from one that
-  // ran by never having started.
-  property bool _notifyStarted: false
+  property bool started: false
+  // How long to wait before starting it again. Doubles while it keeps failing,
+  // so a missing or broken helper costs one line in the shell's log a minute,
+  // not one a second.
+  property int backoffMs: 2000
 
   Process {
-    id: notifyProcess
+    id: daemon
+    // The installed copy, by its fixed path: setup puts it there, and a plugin
+    // update never changes what runs here until setup runs again.
+    command: ["/usr/local/bin/tormarchyd"]
+    // Started and stopped by hand below, never bound: Quickshell writes
+    // `running` itself when the process exits, which would break a binding.
     running: false
-    command: []
-    stdout: StdioCollector { id: notifyStdout; waitForEnd: true }
-    onStarted: root._notifyStarted = true
-    // An Omarchy without the sender: say nothing rather than fall back to
-    // notify-send, which Omarchy itself never uses -- and stop asking, rather
-    // than log a failed start into the shell's journal on every change.
-    onRunningChanged: {
-      if (running || root._notifyStarted) return
-      root.notificationsAvailable = false
-      root._queuedNotification = null
-    }
-    onExited: function(exitCode) {
-      // The sender ran but could not find something it needs.
-      if (exitCode === 127) {
-        root.notificationsAvailable = false
-        root._queuedNotification = null
-        return
-      }
-      var id = String(notifyStdout.text || "").trim()
-      if (exitCode === 0 && /^[0-9]+$/.test(id)) root._toastId = id
-      var queued = root._queuedNotification
-      root._queuedNotification = null
-      if (queued) root.notify(queued)
-    }
-  }
-
-  // Every privileged helper escalates itself (sudo when it has a tty, pkexec
-  // otherwise), exactly like omarchy-dns. From the shell there is no tty, so
-  // this surfaces Omarchy's own polkit dialog and we never shell out to a
-  // terminal just to ask for a password.
-  function connect(requestedMode) {
-    var target = Model.isValidMode(requestedMode) ? String(requestedMode) : defaultMode
-    // Every mode gets the optimistic state, browser-only included: it applies no
-    // rules, but it does start tor, which is what "on" means there.
-    run(["tormarchy", "connect", target], 1, qsTr("Connecting…"))
-  }
-
-  function disconnect() {
-    if (actionProcess.running && _desired === 1 && !cancelProcess.running) {
-      // The connect cannot be killed from here -- it runs as root -- so it is
-      // cancelled the way connect itself watches for: tor stopping.
-      _desired = 0
-      actionStatus = qsTr("Cancelling…")
-      cancelProcess.command = ["bash", "-c", "exec tormarchy disconnect"]
-      cancelProcess.running = true
-      return
-    }
-    run(["tormarchy", "disconnect"], 0, qsTr("Disconnecting…"))
-  }
-
-  function toggleConnected() {
-    if (!canToggle) return
-    if (active) disconnect()
-    else connect(effectiveMode)
-  }
-
-  function setMode(requestedMode) {
-    if (!Model.isValidMode(requestedMode) || String(requestedMode) === mode) return
-    run(["tormarchy", "mode", String(requestedMode)], -1, qsTr("Switching to %1…").arg(Model.modeLabel(requestedMode)))
-  }
-
-  // Unprivileged: NEWNYM over the control port, authenticated with the cookie
-  // our group membership lets us read. No restart, no password.
-  function newCircuit() {
-    // The measured latency belonged to the old path. Keeping it on screen next
-    // to a new circuit would be quietly wrong, so drop it.
-    latencyMs = 0
-    speedError = ""
-    latencyHistory = []
-    // The live stream too. Its whole trick is one kept-alive connection, and a
-    // connection stays on the circuit it was opened on: NEWNYM only moves new
-    // streams. Left running, the gauge went on timing the circuit you had just
-    // left. Stopped here, and started again once NEWNYM has taken effect, it
-    // opens its connection on the new one.
-    _pingHeld = true
-    run(["tormarchy", "newnym"], -1, qsTr("Requesting a new circuit…"))
-    measureAfterChange.restart()
-  }
-
-  function measureSpeed() {
-    // Same gate as the live stream: an on-demand reading while the toggle is off
-    // would measure a proxy the user has already switched away from.
-    if (speedProcess.running || !circuitReady) return
-    measuringSpeed = true
-    speedError = ""
-    _speedOutput = ""
-    speedProcess.command = ["bash", "-c", "exec tormarchy speed --json"]
-    speedProcess.running = true
-  }
-
-  function checkLeaks() {
-    if (doctorProcess.running || !installed) return
-    checkingLeaks = true
-    leakError = ""
-    doctorProcess.command = ["bash", "-c", "exec tormarchy doctor --json"]
-    doctorProcess.running = true
-  }
-
-  // A report describes the machine as it was. Anything that changes the routing
-  // makes it a claim about a state that no longer exists, so it goes.
-  function forgetLeakResult() {
-    leakResult = null
-    leakCheckedAtMs = 0
-    leakError = ""
-  }
-
-  function loadBridgeDetail() {
-    if (bridgeStatusProcess.running || !installed) return
-    bridgeStatusProcess.command = ["bash", "-c", "exec tormarchy bridge status --json"]
-    bridgeStatusProcess.running = true
-  }
-
-  function pasteBridges() {
-    if (bridgeWorking || !installed) return
-    cancelBridges()
-    clipboardProcess.command = Model.clipboardArgv()
-    clipboardProcess.running = true
-  }
-
-  function applyBridges() {
-    if (bridgeWorking || busy || _pendingBridgeText === "") return
-    if (!bridgePreview || bridgePreview.invalidLines > 0) return
-    if (Model.missingTransports(bridgePreview).length > 0) return
-    _bridgeActionPending = true
-    actionStatus = qsTr("Switching to bridges…")
-    bridgeSetProcess.command = ["bash", "-c", "exec tormarchy bridge set"]
-    bridgeSetProcess.stdinEnabled = true
-    bridgeSetProcess.running = true
-  }
-
-  function cancelBridges() {
-    _pendingBridgeText = ""
-    bridgePreview = null
-    bridgeMessage = ""
-  }
-
-  function setBridgesEnabled(on) {
-    _bridgeActionPending = true
-    run(["tormarchy", "bridge", on ? "on" : "off"], -1,
-        on ? qsTr("Turning bridges on…") : qsTr("Turning bridges off…"))
-  }
-
-  onWatchingChanged: {
-    if (!watching) cancelBridges()
-    else checkHelper()
-  }
-
-  function loadExitCountries() {
-    if (exitListProcess.running || !torRunning) return
-    loadingExitCountries = true
-    _exitListOutput = ""
-    exitListProcess.command = ["bash", "-c", "exec tormarchy exit --list"]
-    exitListProcess.running = true
-  }
-
-  function setExit(countryCode) {
-    var cc = String(countryCode || "auto")
-    run(["tormarchy", "exit", cc], -1, cc === "auto"
-      ? qsTr("Clearing exit country…")
-      : qsTr("Switching exit to %1…").arg(cc.toUpperCase()))
-  }
-
-  // The last resort: tear down every rule unconditionally, for when a wedged
-  // ruleset has left the machine with no network to explain itself with.
-  function panic() {
-    run(["tormarchy", "panic"], 0, qsTr("Removing all Tor rules…"))
-  }
-
-  function run(argv, desired, progress) {
-    if (actionProcess.running) return
-    if (desired !== -1) _desired = desired
-    _actionWasConnect = argv[1] === "connect"
-    _bridgeActionPending = argv[1] === "bridge"
-    _actionOutput = ""
-    _actionError = ""
-    actionStatus = String(progress || "")
-    // Same reason as the status poll: go through bash so a missing helper
-    // comes back as exit 127 instead of a process that never spawns.
-    var quoted = []
-    for (var i = 0; i < argv.length; i++) quoted.push(Util.shellQuote(String(argv[i])))
-    actionProcess.command = ["bash", "-c", "exec " + quoted.join(" ")]
-    actionProcess.running = true
-  }
-
-  Timer {
-    id: refreshTimer
-    interval: root.refreshIntervalSec * 1000
-    repeat: true
-    running: root.live
-    triggeredOnStart: true
-    onTriggered: root.refresh()
-  }
-
-  Timer {
-    // While bootstrapping, the percentage is the whole story — poll fast
-    // enough that it actually animates instead of jumping 0 -> 100.
-    //
-    // Only while a toggle is catching up or someone is looking. A connect that
-    // stalls leaves tor running short of 100% with nobody waiting on it, and
-    // gating on bootstrapping alone polled once a second until reboot.
-    id: bootstrapPoll
-    interval: 1000
-    repeat: true
-    running: root._desired !== -1 || (root.bootstrapping && root.watching)
-    onTriggered: root.refresh()
-  }
-
-  Timer {
-    id: delayedRefresh
-    interval: 600
-    repeat: false
-    onTriggered: root.refresh()
-  }
-
-  // Holds the live stream off across a circuit change. See newCircuit().
-  property bool _pingHeld: false
-
-  // Live latency, streamed from one persistent connection through the circuit.
-  //
-  // A long-running child rather than a timer firing one-shot measurements: the
-  // expensive part of a reading is building the connection, so reusing one and
-  // re-timing it is what makes a live number affordable at all. Quickshell kills
-  // the process when `running` goes false, so closing the panel stops it and
-  // there is no daemon to leak.
-  Process {
-    id: pingProcess
-    running: root.watching && root.circuitReady && !root._pingHeld
-    command: ["bash", "-c", "exec tormarchy pingd " + root.speedIntervalSec]
+    stdinEnabled: true
 
     stdout: SplitParser {
       onRead: function(line) {
-        var ms = parseInt(String(line).trim(), 10)
-        if (!isFinite(ms) || ms <= 0) return
-        root.latencyMs = ms
-        root.speedError = ""
-        root.measuringSpeed = false
+        var data = null
+        try { data = JSON.parse(line) } catch (e) { return }
+        if (data && typeof data.view === "object" && data.view !== null) root.view = data.view
       }
     }
 
-    stderr: SplitParser {
-      onRead: function(line) {
-        var text = String(line).trim()
-        if (text !== "") root.speedError = Model.elide(text, 120)
-      }
+    onStarted: {
+      root.started = true
+      root.backoffMs = 2000
+      root.send({ cmd: "hello", settings: root.settings, pluginDir: root.pluginDir })
+      if (root.watchers > 0) root.send({ cmd: "watch", on: true })
     }
 
+    // Quickshell reports a program it cannot find without an exit, only
+    // running falling back to false; either way the next try is scheduled.
     onRunningChanged: {
-      // Show the spinner while the first reading is in flight; after that the
-      // stream keeps the number current on its own.
-      if (running && root.latencyMs <= 0) root.measuringSpeed = true
-      else if (!running) root.measuringSpeed = false
+      if (running) return
+      root.started = false
+      root.view = root.placeholder
+      if (root.live) restart.restart()
     }
   }
 
   Timer {
-    // A fresh circuit is a different path. The delay lets NEWNYM take effect
-    // first, so the stream's new connection is built on the new circuit; its
-    // first reading then fills the gauge without waiting a full interval.
-    id: measureAfterChange
-    interval: 1500
+    id: restart
+    interval: root.backoffMs
     repeat: false
-    onTriggered: root._pingHeld = false
-  }
-
-  Timer {
-    id: actionStatusTimer
-    interval: 2600
-    repeat: false
-    onTriggered: root.actionStatus = ""
-  }
-
-  Timer {
-    // Applying or flushing a ruleset settles quickly, but bootstrap does not.
-    // Re-poll a handful of times so the panel reflects the new state without
-    // waiting on the periodic refresh, then stop overriding reality.
-    id: settleTimer
-    property int ticks: 0
-    interval: 1500
-    repeat: true
-    running: false
     onTriggered: {
-      settleTimer.ticks += 1
-      root.refresh()
-      if (settleTimer.ticks >= 8) {
-        settleTimer.ticks = 0
-        settleTimer.running = false
-        root._desired = -1
-        root._bridgeActionPending = false
-      }
-    }
-  }
-
-  Process {
-    id: statusProcess
-    running: false
-    command: []
-    stdout: StdioCollector { id: statusStdout; waitForEnd: true; onStreamFinished: root._statusOutput = text }
-    stderr: StdioCollector { id: statusStderr; waitForEnd: true; onStreamFinished: root._statusError = text }
-    onExited: function(exitCode) {
-      root.refreshing = false
-      // Issued before the last action completed, so it describes the machine as
-      // it was beforehand. The settle poll that every action starts is already
-      // on its way with a current answer.
-      if (root._statusEpoch !== root._actionEpoch) return
-      var stdout = String(statusStdout.text || root._statusOutput || "")
-      var stderr = String(statusStderr.text || root._statusError || "")
-      // A missing helper is the expected pre-setup state, not an error to
-      // shout about: report "not installed" and let the panel offer setup.
-      if (exitCode === 0) {
-        root.applyStatus(stdout)
-      } else if (exitCode === 127) {
-        root.installed = false
-        root.connected = false
-        root.torRunning = false
-        root.statusText = "Tor helpers are not installed"
-        root.lastError = ""
-        root.noteConnectionState()
-      } else {
-        root.lastError = Model.elide(stderr || stdout || "Could not read Tor status")
-      }
-    }
-  }
-
-  Process {
-    id: actionProcess
-    running: false
-    command: []
-    stdout: StdioCollector { id: actionStdout; waitForEnd: true; onStreamFinished: root._actionOutput = text }
-    stderr: StdioCollector { id: actionStderr; waitForEnd: true; onStreamFinished: root._actionError = text }
-    onExited: function(exitCode) {
-      var stdout = String(actionStdout.text || root._actionOutput || "")
-      var stderr = String(actionStderr.text || root._actionError || "")
-      // A connect that a cancel just stopped fails by design. Its message is
-      // not news, and the cancel's own result is what gets reported.
-      if (cancelProcess.running || root._cancelled) {
-        root._cancelled = false
-        root._actionEpoch += 1
-        return
-      }
-      if (exitCode !== 0) {
-        // Drop the optimistic state: whatever we hoped for did not happen.
-        root._desired = -1
-        root.lastError = Model.elide(stderr || stdout || "Tor command failed")
-        // A connect can run for minutes while it waits on tor, long after the
-        // panel has been closed and forgotten. Its failure is worth a toast.
-        if (root._actionWasConnect && exitCode !== 126 && exitCode !== 127)
-          root.notify(Model.connectFailedNotification(root.lastError, root.notificationPolicy))
-        root.actionStatus = root.lastError
-        actionStatusTimer.restart()
-      } else {
-        root.lastError = ""
-        actionStatusTimer.restart()
-      }
-      // Everything read before this point is now stale.
-      root._actionEpoch += 1
-      root.forgetLeakResult()
-      if (root._bridgeActionPending) root.loadBridgeDetail()
-      settleTimer.ticks = 0
-      settleTimer.restart()
-      delayedRefresh.restart()
-    }
-  }
-
-  property bool _cancelled: false
-  property bool _actionWasConnect: false
-
-  Process {
-    id: cancelProcess
-    running: false
-    command: []
-    stderr: StdioCollector { id: cancelStderr; waitForEnd: true }
-    onExited: function(exitCode) {
-      // Tells the connect's own exit, which can land after this, to stay quiet.
-      // Only when the cancel worked: a failed one leaves the connect running,
-      // and its result is still news.
-      root._cancelled = actionProcess.running && exitCode === 0
-      if (exitCode !== 0) {
-        root._desired = -1
-        root.lastError = Model.elide(String(cancelStderr.text || "") || qsTr("Could not cancel the connection"))
-        root.actionStatus = root.lastError
-      } else {
-        root.lastError = ""
-      }
-      actionStatusTimer.restart()
-      root._actionEpoch += 1
-      root.forgetLeakResult()
-      settleTimer.ticks = 0
-      settleTimer.restart()
-      delayedRefresh.restart()
-    }
-  }
-
-  Process {
-    id: helperCheckProcess
-    running: false
-    command: []
-    // 1 is "they differ"; anything else -- the same, or not comparable -- is
-    // not worth a prompt.
-    onExited: function(exitCode) { root.helperStale = exitCode === 1 }
-  }
-
-  Process {
-    id: bridgeStatusProcess
-    running: false
-    command: []
-    stdout: StdioCollector { id: bridgeStatusStdout; waitForEnd: true }
-    onExited: function(exitCode) {
-      var report = Model.parseBridgeReport(String(bridgeStatusStdout.text || ""))
-      if (exitCode === 0 && report.ok) {
-        root.bridgeDetail = report
-        if (report.state !== "") root.bridgeState = report.state
-      }
-    }
-  }
-
-  Process {
-    id: clipboardProcess
-    running: false
-    command: []
-    stdout: StdioCollector { id: clipboardStdout; waitForEnd: true }
-    onExited: function(exitCode) {
-      if (exitCode === 3) {
-        root.bridgeMessage = qsTr("Too much on the clipboard to be bridge lines.")
-        return
-      }
-      if (exitCode !== 0) {
-        root.bridgeMessage = qsTr("Could not read the clipboard.")
-        return
-      }
-      var text = String(clipboardStdout.text || "")
-      if (text.trim() === "") {
-        root.bridgeMessage = qsTr("The clipboard is empty. Copy your bridge lines first.")
-        return
-      }
-      root._pendingBridgeText = text
-      bridgeCheckProcess.command = ["bash", "-c", "exec tormarchy bridge check"]
-      bridgeCheckProcess.stdinEnabled = true
-      bridgeCheckProcess.running = true
-    }
-  }
-
-  Process {
-    id: bridgeCheckProcess
-    running: false
-    command: []
-    stdout: StdioCollector { id: bridgeCheckStdout; waitForEnd: true }
-    // Closing stdin is the end of input that `bridge check` reads to.
-    onStarted: {
-      bridgeCheckProcess.write(root._pendingBridgeText + "\n")
-      bridgeCheckProcess.stdinEnabled = false
-    }
-    onExited: function(exitCode) {
-      var report = Model.parseBridgeReport(String(bridgeCheckStdout.text || ""))
-      if (exitCode !== 0 || !report.ok || report.count === 0) {
-        root._pendingBridgeText = ""
-        root.bridgeMessage = qsTr("No bridge lines on the clipboard. Each starts with a transport, like obfs4.")
-        return
-      }
-      root.bridgePreview = report
-    }
-  }
-
-  Process {
-    id: bridgeSetProcess
-    running: false
-    command: []
-    stderr: StdioCollector { id: bridgeSetStderr; waitForEnd: true }
-    onStarted: {
-      bridgeSetProcess.write(root._pendingBridgeText + "\n")
-      bridgeSetProcess.stdinEnabled = false
-      root._pendingBridgeText = ""
-    }
-    onExited: function(exitCode) {
-      root.bridgePreview = null
-      if (exitCode === 126) {
-        // The password prompt was dismissed. Nothing changed, and that is not news.
-        root.bridgeMessage = ""
-      } else if (exitCode !== 0) {
-        root.bridgeMessage = Model.elide(String(bridgeSetStderr.text || "") || qsTr("Could not switch to bridges"))
-      } else {
-        root.bridgeMessage = ""
-      }
-      root.actionStatus = ""
-      root._actionEpoch += 1
-      root.forgetLeakResult()
-      root.loadBridgeDetail()
-      settleTimer.ticks = 0
-      settleTimer.restart()
-      delayedRefresh.restart()
-    }
-  }
-
-  Process {
-    id: doctorProcess
-    running: false
-    command: []
-    stdout: StdioCollector { id: doctorStdout; waitForEnd: true }
-    onExited: function(exitCode) {
-      root.checkingLeaks = false
-      // doctor exits non-zero whenever a check fails, which is a result, not an
-      // error. Only a report that cannot be read is an error.
-      var parsed = Model.parseDoctor(String(doctorStdout.text || ""))
-      if (parsed.ok) {
-        root.leakResult = parsed
-        root.leakCheckedAtMs = Date.now()
-      } else {
-        root.leakError = parsed.error
-      }
-    }
-  }
-
-  Process {
-    id: exitListProcess
-    running: false
-    command: []
-    stdout: StdioCollector { id: exitListStdout; waitForEnd: true; onStreamFinished: root._exitListOutput = text }
-    onExited: function(exitCode) {
-      root.loadingExitCountries = false
-      if (exitCode !== 0) return
-      var lines = String(exitListStdout.text || root._exitListOutput || "").split("\n")
-      var codes = []
-      for (var i = 0; i < lines.length; i++) {
-        var cc = lines[i].trim().toLowerCase()
-        if (cc.length === 2) codes.push(cc)
-      }
-      root.exitCountries = codes
-      root.exitCountriesLoaded = true
-    }
-  }
-
-  Process {
-    id: speedProcess
-    running: false
-    command: []
-    stdout: StdioCollector { id: speedStdout; waitForEnd: true; onStreamFinished: root._speedOutput = text }
-    onExited: function(exitCode) {
-      root.measuringSpeed = false
-      var parsed = Model.parseSpeed(String(speedStdout.text || root._speedOutput || ""))
-      if (parsed.ok) {
-        root.latencyMs = parsed.latencyMs
-        root.latencyHistory = Model.pushHistory(root.latencyHistory, parsed.latencyMs, 16)
-        root.speedError = ""
-      } else {
-        root.latencyMs = 0
-        root.speedError = parsed.error || qsTr("Could not measure the circuit")
-      }
+      if (!root.live || daemon.running) return
+      root.backoffMs = Math.min(60000, root.backoffMs * 2)
+      daemon.running = true
     }
   }
 }

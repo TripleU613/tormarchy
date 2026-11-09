@@ -106,12 +106,15 @@ impl Reply {
     }
 }
 
+/// Sets the socket's read timeout to what is left of the deadline.
+type SetTimeout = Box<dyn Fn(Option<Duration>) -> io::Result<()> + Send>;
+
 /// Reads reply lines from a byte stream, enforcing a byte budget and a deadline.
 pub struct Reader<R: Read> {
     inner: BufReader<R>,
     budget: usize,
     deadline: Option<Instant>,
-    set_timeout: Option<Box<dyn Fn(Option<Duration>) -> io::Result<()> + Send>>,
+    set_timeout: Option<SetTimeout>,
 }
 
 impl<R: Read> Reader<R> {

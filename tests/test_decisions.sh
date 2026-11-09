@@ -2,13 +2,11 @@
 #
 # Pins decisions that are easy to undo by accident.
 #
-# Quickshell's Process, Panel and the qs.Ui kit only exist inside a running
-# Omarchy shell, and the privileged half only does anything as root on a machine
-# with tor installed. So the behaviour that matters cannot be exercised here.
-# What can be pinned is the source: each check below stands for a decision that
-# cost something to learn, with a comment saying what breaks without it.
-#
-# Idea borrowed from huacnlee/omarchy-mihoro's test_panel_source.sh.
+# The behaviour is tested where it lives: the Rust crates' own tests, the
+# daemon scenarios, the QML load and wiring tests. What is pinned here is what
+# spans files -- the polkit policy against the helper's allow-list, the fixed
+# paths the bootstrap and the panel agree on -- and what only reads as source:
+# that the QML stays drawing-only.
 
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
@@ -17,43 +15,30 @@ failures=0
 ok()   { printf '  \033[32mok\033[0m    %s\n' "$1"; }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; failures=$(( failures + 1 )); }
 
-# The -- matters: a pinned string can itself start with a dash, a command-line
-# flag for instance, and grep would otherwise take it for one of its own.
 want() {          # want <description> <file> <fixed-string>
   if grep -Fq -- "$3" "$2"; then ok "$1"; else bad "$1 (missing in $2: $3)"; fi
 }
 reject() {        # reject <description> <file> <fixed-string>
   if grep -Fq -- "$3" "$2"; then bad "$1 (found in $2: $3)"; else ok "$1"; fi
 }
-# For order, which a single fixed string cannot pin: grep -F given two lines
-# matches either of them on its own.
-want_next() {     # want_next <description> <file> <line> <the line after it>
-  if awk -v a="$3" -v b="$4" 'hit && index($0, b) { found = 1; exit } { hit = index($0, a) > 0 } END { exit !found }' "$2"
-  then ok "$1"; else bad "$1 (in $2, '$4' does not follow '$3')"; fi
-}
+
+HELPER=crates/tormarchy/src/main.rs
+INSTALL=crates/tormarchy/src/install.rs
+BROWSER=crates/tormarchy/src/browser.rs
 
 echo "Privilege boundary"
 
-# setup and uninstall must never be reachable through the polkit grant. The
-# single action pins the program path and not its arguments, so a passwordless
-# grant for connecting would otherwise also cover uninstalling.
-want "setup requires a terminal" tormarchy "require_terminal_root"
-want "the terminal check refuses pkexec" tormarchy 'PKEXEC_UID:-} ]] || die'
-
-# The passwordless grant reaches only the subcommands that need root, never all
-# of them. One action per subcommand, pinned to it as the first argument; pkexec
-# skips an action whose argv1 does not match, and with no match at all falls
-# back to its generic action, which asks for a password and which the rule never
-# grants. An action pinned to the path with no argv1 matches every subcommand:
-# that was the whole hole, browser-exec handing out root shells.
+# The passwordless grant reaches only the subcommands that need root. One action
+# per subcommand, pinned to the installed path and to the subcommand as its
+# first argument; an action with no argv1 matches every subcommand, which once
+# handed out root shells through browser-exec.
 if python3 - <<'PY'
 import re, sys
 policy = open("etc/polkit/com.tormarchy.policy").read()
-script = open("tormarchy").read()
-allowed = re.search(r"^PKEXEC_COMMANDS=\(([^)]*)\)", script, re.M).group(1).split()
+src = open("crates/tormarchy/src/main.rs").read()
+allowed = re.findall(r'"([a-z-]+)"', re.search(r"const PKEXEC_COMMANDS: \[&str; \d+\] = \[([^\]]*)\]", src).group(1))
 actions = re.findall(r'<action id="([^"]+)">(.*?)</action>', policy, re.S)
-problems = []
-argv1s = []
+problems, argv1s = [], []
 for action_id, body in actions:
     path = re.search(r'exec\.path">([^<]*)<', body)
     argv1 = re.search(r'exec\.argv1">([^<]*)<', body)
@@ -65,7 +50,7 @@ for action_id, body in actions:
         argv1s.append(argv1.group(1))
 if sorted(argv1s) != sorted(allowed):
     problems.append(f"policy grants {sorted(argv1s)}, PKEXEC_COMMANDS lists {sorted(allowed)}")
-for forbidden in ("browser-exec", "browser", "setup", "uninstall", "boot", "menu"):
+for forbidden in ("browser-exec", "browser", "setup", "uninstall", "boot", "menu", "doctor", "status"):
     if forbidden in argv1s or forbidden in allowed:
         problems.append(f"{forbidden} is reachable as root through polkit")
 if problems:
@@ -74,13 +59,24 @@ if problems:
 PY
 then ok "polkit grants exactly the subcommands that need root, each pinned by its first argument"
 else bad "the polkit grant reaches more than it should (above)"; fi
-want "the dispatcher refuses anything else under pkexec" tormarchy 'if [[ -n ${PKEXEC_UID:-} && " ${PKEXEC_COMMANDS[*]} " != *" $command "* ]]; then'
-want "browser-exec never runs as root" tormarchy '(( EUID != 0 )) || die "browser-exec never runs as root"'
-want "nor does a browser launch" tormarchy '(( EUID != 0 )) || die "launch the browser as yourself, not as root"'
+
+want "the dispatcher refuses anything else under pkexec" "$HELPER" '!PKEXEC_COMMANDS.contains(&command.as_str())'
+want "setup and uninstall require a terminal and sudo" "$HELPER" 'fn require_terminal_root()'
+want "browser-exec never runs as root" "$BROWSER" '"browser-exec never runs as root"'
+want "nor does a browser launch" "$BROWSER" '"launch the browser as yourself, not as root"'
+want "the helper fixes PATH before anything runs" "$HELPER" 'std::env::set_var("PATH", sys::FIXED_PATH);'
+want "and closes its umask" "$HELPER" 'libc::umask(0o077);'
+want "escalation re-runs this exact binary" "$HELPER" 'Command::new(runner).arg(self_path()).args(argv).exec()'
+
+# The daemon runs as the user and keeps the user's PATH -- Omarchy's notifier
+# lives only there -- so it must never be the thing that runs as root.
+reject "the daemon never escalates" crates/tormarchyd/src/daemon.rs 'pkexec'
+reject "nor uses sudo" crates/tormarchyd/src/daemon.rs '"sudo"'
+reject "the root helper has no test seam" "$HELPER" 'TORMARCHY_ROOT'
+reject "nor does the core it runs" crates/tormarchy-core/src/paths.rs 'TORMARCHY_ROOT'
 
 # A double hyphen inside an XML comment makes the whole document unparseable,
-# polkitd registers nothing, and pkexec falls back to prompting with no
-# explanation anywhere. This cost three rounds to find once.
+# polkitd registers nothing, and pkexec prompts with no explanation anywhere.
 if python3 - <<'PY'
 import re, sys
 s = open("etc/polkit/com.tormarchy.policy").read()
@@ -91,250 +87,94 @@ else bad "a double hyphen appears inside an XML comment"
 fi
 
 echo
-echo "Bridges"
+echo "What lands as root"
 
-# A root-run helper must not read a path an unprivileged caller chose. The
-# earlier version did, and also deleted that path afterwards behind a glob that
-# matched traversal, giving arbitrary file read and delete as root.
-# The escalation must come before the read, so the check is that require_root
-# appears inside the set case rather than anywhere in the file.
-if awk '/^  set\)/{f=1} f&&/require_root/{print;exit}' tormarchy | grep -Fq require_root; then
-  ok "bridge set escalates before reading"
-else
-  bad "bridge set does not escalate before reading stdin"
-fi
-reject "bridge set takes no caller path" tormarchy '/tmp/.tormarchy-bridges'
-
-echo
-echo "Ordering in the ruleset"
-
-# Order is the whole correctness argument for the firewall, and every one of
-# these was a real leak.
-want "onion range is dropped in the filter chain" tormarchy 'ip daddr $VIRT_NET drop'
-want "forward traffic is dropped" tormarchy "hook forward priority filter; policy drop"
-want "invalid conntrack state is dropped" tormarchy "ct state invalid drop"
-want "IPv6 is dropped explicitly" tormarchy "meta nfproto ipv6 drop"
-
-# Switching on moves the machine only onto a route already proven to carry
-# traffic. Without it the switch lands on circuits still being built, and
-# everything on the machine waits on them: the big drop.
-if awk '/^cmd_connect\(\) \{/ { inside = 1 } inside && /find_route \|\|/ { found = NR } inside && /apply_rules "\$mode"/ { applied = NR } inside && /^}/ { exit } END { exit !(found && applied && found < applied) }' tormarchy
-then ok "connect proves a route before any rule goes on"; else bad "connect applies rules without proving a route first"; fi
-
-# Rules go on only after a full bootstrap. Applying them earlier redirects
-# everything into a daemon that cannot carry it, which looks exactly like a dead
-# network.
-want "connect waits for bootstrap before applying" tormarchy 'pct=$(wait_bootstrap 120)'
-want "a stall applies nothing" tormarchy "No rules applied, networking is unchanged"
-
-# The kernel IPv6 switch is written to /proc, never /etc/sysctl.d. Persisting it
-# means a crash leaves IPv6 dead after the next reboot with nothing explaining
-# why.
-want "IPv6 is disabled through /proc" tormarchy "/proc/sys/net/ipv6/conf"
-reject "IPv6 is not persisted to sysctl.d" tormarchy "sysctl.d/98"
+# Nothing installed as root is read from the user-writable plugin checkout: the
+# files are inside the binary the bootstrap verified.
+for f in etc/torrc.d/00-tormarchy.conf etc/tmpfiles/tor.conf etc/polkit/com.tormarchy.policy etc/polkit/49-tormarchy.rules.in; do
+  want "$f is compiled into the helper" "$INSTALL" "include_str!(\"../../../$f\")"
+done
+want "setup verifies the release's Sigstore signature" setup 'cosign verify-blob'
+want "against this repository's release workflow" setup '--certificate-identity "https://github.com/$REPO/$WORKFLOW"'
+want "at the commit the tag names on GitHub" setup '--certificate-github-workflow-sha "$commit"'
+want "found on GitHub, not in this checkout" setup 'git ls-remote "https://github.com/$REPO.git"'
+want "extracting only the two binaries" setup 'tormarchy tormarchyd'
+want "and checking the binary is the version the plugin declares" setup '[[ $got == "tormarchy $version" ]]'
+reject "uninstall does not disable a tor it never enabled" "$INSTALL" '"disable", "tor.service"'
+reject "setup does not enable tor at boot" "$INSTALL" '"enable", "tor.service"'
+reject "the ruleset is never persisted" crates/tormarchy-core/src/firewall.rs "/etc/nftables.conf"
+reject "IPv6 is never persisted to sysctl.d" crates/tormarchy-core/src/firewall.rs "/etc/sysctl.d"
 
 echo
-echo "Recovery"
+echo "The panel draws; the daemon decides"
 
-# Nothing is written to /etc/nftables.conf, so a reboot always restores normal
-# networking. That is the guaranteed way out of a wedged ruleset.
-reject "the ruleset is never persisted" tormarchy "/etc/nftables.conf"
-reject "boot enable needs nothing beside the installed copy" tormarchy "etc/systemd/tormarchy-boot.service"
-
-# The boot receiver is the one exception, and it must stay opt-in.
-want "boot reconnect is gated on a marker" tormarchy 'ConditionPathExists=$RECONNECT_MARKER'
-want "uninstall removes the boot unit" tormarchy 'rm -f "$BOOT_UNIT"'
-
-# Removing the rules comes before removing the tool that knows how to remove
-# them.
-want "uninstall drops the firewall first" tormarchy "Removing any firewall rules"
-
-echo
-echo "Runtime state"
-
-# The circuit cache lived at ${XDG_RUNTIME_DIR:-/tmp}/tormarchy-path.cache and
-# was read and then truncated through that path directly. In the /tmp fallback
-# the name is globally predictable, so a symlink planted there turned every
-# panel refresh into a write into another file the user could reach. Found in
-# marketplace security review at ed6795e.
-reject "no /tmp fallback for runtime state" tormarchy 'XDG_RUNTIME_DIR:-/tmp'
-reject "no globally predictable cache name" tormarchy "tormarchy-path.cache"
-want "runtime state requires a private directory" tormarchy "runtime_dir()"
-want "the runtime directory must be owned and not a symlink" tormarchy '[[ -n $base && ! -L $base && -d $base && -O $base ]] || return 1'
-want "the runtime directory is created 0700" tormarchy 'mkdir -m 0700 -- "$dir"'
-
-# An entry is read through the flags of a single open, not through a stat of the
-# name first. Testing the name and then opening it are two steps, and a process
-# running as this same user -- the only account that can reach inside a 0700
-# directory -- can swap the entry for a symlink or a fifo in between, so the
-# earlier type and owner tests said nothing about what was actually opened.
-# Ownership is not the boundary within one uid anyway.
-reject "the cache read does not stat the name before opening it" tormarchy '[[ ! -L $path && -f $path'
-want "the cache read is one no-follow, nonblocking open" tormarchy "iflag=nofollow,nonblock"
-want "the cache read is bounded by that same open" tormarchy 'bs="$CACHE_BYTE_LIMIT" count=1'
-
-# Writing through the path itself is what made a planted symlink useful. A
-# fresh mktemp file plus a rename cannot follow a link, and leaves no
-# half-written line for a concurrent reader.
-want "cache writes go through a fresh temporary file" tormarchy 'tmp=$(mktemp -- "$path.XXXXXX"'
-want "cache writes land by atomic rename" tormarchy 'mv -f -- "$tmp" "$path"'
-
-# Same class, worse blast radius: tor --verify-config runs as root during setup
-# and its output went to a fixed /tmp name, so a symlink planted there was a
-# root-owned truncate of any file on the system.
-reject "setup does not write its verify log to a fixed path" tormarchy "/tmp/tormarchy-verify.log"
-want "the verify log is created by mktemp" tormarchy 'verify_log=$(mktemp --'
-
-echo
-echo "Control port"
-
-# Every caller captures a control-port reply whole in a shell variable, and the
-# panel asks again every few seconds. Read with a bare cat, a faulty or
-# compromised local endpoint that answers without ever stopping grew that
-# process for as long as the timeout allowed -- 367 MB inside five seconds,
-# measured against a flooding endpoint. The ceiling has to be applied while the
-# socket is read, not after command substitution has already retained the reply.
-reject "the control-port reply is not read without a ceiling" tormarchy "cat <&3"
-want "the control-port reply has a byte ceiling" tormarchy 'head -c "$CONTROL_REPLY_BYTE_LIMIT" <&3'
-want "the ceiling is applied inside the timeout" tormarchy 'timeout "${TOR_CONTROL_TIMEOUT:-5}" head -c'
-
-echo
-echo "The panel talks to the dispatcher"
-
-# The fifteen separate executables are gone. Any leftover hyphenated call would
-# be a command that no longer exists.
-reject "no calls to the old hyphenated helpers" Service.qml "tormarchy-"
-want "status is read as JSON" Service.qml "exec tormarchy status --json"
-want "live latency streams from pingd" Service.qml "exec tormarchy pingd"
-
-# Measuring only while the panel is open. A request to a fixed host at a fixed
-# interval forever is a recognisable traffic pattern.
-want "latency streaming is gated on the panel being open" Service.qml "root.watching && root.circuitReady"
+[[ ! -e Model.js ]] && ok "no Model.js" || bad "Model.js is back; that logic lives in tormarchy-core::view"
+for f in Panel.qml Service.qml TorIcon.qml SpeedGauge.qml TorWordmark.qml; do
+  reject "$f runs no shell" "$f" '"bash"'
+  reject "$f calls no notify-send" "$f" 'notify-send'
+done
+want "the service runs the installed daemon by its fixed path" Service.qml 'command: ["/usr/local/bin/tormarchyd"]'
+reject "and starts nothing else" Service.qml '"tormarchy"'
+reject "the panel starts no process of its own" Panel.qml 'Process {'
 want "the panel sets watching from opened" Panel.qml "tor.watch(opened)"
-
-# ...and on the connection being on, not merely on the daemon running. Gating the
-# stream on raw torRunning left a live millisecond reading ticking under an OFF
-# switch, because the daemon outlives the disconnect click. Requiring the
-# connection to be real and not just asked for keeps it from pointing a stream of
-# failing requests at a proxy that cannot carry them during a long bootstrap.
-want "latency stops when the toggle is off, not just when tor stops" Service.qml "readonly property bool circuitReady: torRunning && active"
-want "latency waits for a real connection, not an intended one" Service.qml '(effectiveMode === "socks" || connected)'
-
-# "On" is mode-dependent. Browser-only installs no rules, so measuring it by
-# `connected` left the switch stuck on OFF with tor plainly running, and made
-# clicking it connect again rather than disconnect -- the mode could not be
-# turned off from the panel at all.
-want "the on-state is mode-aware" Service.qml 'effectiveMode === "socks" ? torRunning : connected'
-want "the settle match uses the same definition" Service.qml "liveConnection === (_desired === 1)"
-
-# A status read is several control-port round trips and outlives a fast action,
-# so a reply issued before it repainted the panel with a live circuit under an
-# OFF switch.
-want "stale status reads are dropped" Service.qml "root._statusEpoch !== root._actionEpoch"
-
-# The toggle's busy state is action-only. Folding the routine status poll in made
-# the switch flash and refuse clicks on every refresh.
-want "busy tracks actions, not the status poll" Service.qml "readonly property bool busy: (!!actionProcess && actionProcess.running)"
-
-# A connect waits up to two minutes for bootstrap, and the switch used to refuse
-# every click for all of it. Switching off during that wait cancels instead.
-want "a pending connect can be cancelled from the switch" Service.qml "readonly property bool canToggle"
-want "the panel gates the switch on canToggle, not busy" Panel.qml "tor.installed && tor.canToggle"
-want "connect stops waiting when tor goes away" tormarchy "tor_is_running || break"
-want_next "connect re-checks tor under the lock before applying" tormarchy \
-  "cancelled_unless_running" 'apply_rules "$mode" || die'
-
-
-# The live stream keeps one connection open, and a connection stays on the
-# circuit it was opened on. Without a restart, "New circuit" left the gauge
-# timing the circuit that had just been abandoned.
-want "the latency stream restarts across a new circuit" Service.qml "!root._pingHeld"
-
-echo
-echo "Loading in the shell"
-
-# Qt 6.12 ships a Color type of its own. A bare `Color.x` resolves to it, comes
-# back undefined, and a colour given undefined falls back to black -- the
-# switch's "on" track went black on a dark bar. Qualified everywhere.
-bare=$(awk '
-  { line = $0; sub(/\/\/.*/, "", line) }
-  line ~ /(^|[^.A-Za-z_])Color\.[a-z]/ { print FILENAME ":" FNR ": " $0 }
-' ./*.qml)
-if [[ -z $bare ]]; then ok "no bare Color. in any QML file"; else bad "bare Color. (use Commons.Color):"; printf '        %s\n' "$bare"; fi
-
-# Quickshell's IpcHandler, never Omarchy's ShellIpc. ShellIpc is newer than the
-# latest Omarchy release, and a widget naming a type its shell lacks is left out
-# of the bar without a word -- which is what 1.2.0 did on every released shell.
 want "the panel's IPC is a plain IpcHandler" Panel.qml "IpcHandler {"
 reject "no ShellIpc, which released Omarchy does not have" Panel.qml "ShellIpc {"
-
-# The bar mark centres every layer on the box it is given. Omarchy 4.0.x
-# stretches a custom icon over its whole canvas, and layers placed against
-# their own size drifted into the top-left corner of the stretched box.
+reject "no summon of another plugin's panel" Panel.qml 'summon("omarchy.'
+want "setup is offered in a terminal, never through polkit" Panel.qml '"sudo " + pluginDir + "/setup"'
 reject "no layer of the mark is placed against its own size" TorIcon.qml "(root.size - width) / 2"
 want "the size falls back where the shell has no bar icon size" Panel.qml "Style.bar.iconSize || "
 
 # With `omarchy toggle animations` off the shell sets Style.reduceMotion, and a
-# looping animation must stop rather than spin at zero duration. Both tokens
-# are newer than Omarchy 4.0.x, so every read of them is guarded.
+# looping animation must stop rather than spin at zero duration. Both tokens are
+# newer than Omarchy 4.0.x, so every read of them is guarded.
 want "the bar pulse stops under reduced motion" TorIcon.qml "root.pulsing && root.coreVisible && !root.reduceMotion"
 want "and connecting still reads as a half-lit core" TorIcon.qml "root.reduceMotion ? 0.5 : pulse.level"
 want "the gauge's spinner stops under reduced motion" SpeedGauge.qml "running: root.busy && !root.reduceMotion"
-for f in TorIcon.qml SpeedGauge.qml; do
+for f in TorIcon.qml SpeedGauge.qml Panel.qml; do
   want "$f reads Style.duration only where the shell has it" "$f" 'typeof Style.duration === "function"'
 done
 
-# A third-party plugin's shell facade only summons the plugin's own id. The
-# speed test summon was always refused, after closing the panel first.
-reject "no summon of another plugin's panel" Panel.qml 'summon("omarchy.'
+# Every Text that shows something from outside carries PlainText.
+if python3 - <<'PY'
+import re, sys
+bad = []
+for name in ("Panel.qml",):
+    src = open(name).read()
+    for m in re.finditer(r"\bText\s*\{", src):
+        depth, i = 0, m.end() - 1
+        while True:
+            depth += {"{": 1, "}": -1}.get(src[i], 0)
+            if depth == 0:
+                break
+            i += 1
+        body = src[m.start():i]
+        own = re.sub(r"\{[^{}]*\{.*", "", body, flags=re.S)
+        if "textFormat: Text.PlainText" not in body:
+            bad.append(f"    {name}:{src[:m.start()].count(chr(10)) + 1}")
+if bad:
+    print("\n".join(bad))
+    sys.exit(1)
+PY
+then ok "every Text on the panel is plain text"
+else bad "a Text could render markup from outside (above)"; fi
 
-echo
-echo "Escapes and disconnections"
+# Labels on the panel, never sentences: anything longer is a bubble's.
+if python3 - <<'PY'
+import re, sys
+bad = []
+for n, line in enumerate(open("Panel.qml"), 1):
+    for text in re.findall(r'text:\s*"((?:[^"\\]|\\.)*)"', line):
+        if len(text) > 32:
+            bad.append(f"    Panel.qml:{n}: {text}")
+if bad:
+    print("\n".join(bad))
+    sys.exit(1)
+PY
+then ok "no string on the panel is longer than a label"
+else bad "a sentence is on the panel itself (above); put it in a tooltip"; fi
 
-# IPAddressDeny on a --user scope is a BPF program a user manager cannot load.
-# systemd logs it and carries on without it, so the "locked to Tor" browser was
-# not locked at all. The lock is an nftables rule on the scope's cgroup instead.
-reject "browser-only does not rely on IPAddressDeny" tormarchy "--property=IPAddressDeny"
-want "browser-only is locked by cgroup in nftables" tormarchy 'socket cgroupv2 level'
-reject "uninstall does not disable a tor it never enabled" tormarchy 'systemctl disable tor.service'
-reject "setup does not enable tor at boot behind anyone's back" tormarchy 'systemctl enable tor.service'
-want "the browser is not started if the lock fails" tormarchy 'could not lock the browser to Tor, so it was not started'
-# A running Chromium handed a new window opens it in the existing, unproxied
-# process. Its own profile forces an instance of its own.
-want "chromium gets an instance of its own" tormarchy '--user-data-dir=$data/chromium-$name'
-want "qutebrowser gets an instance of its own" tormarchy '--basedir "$data/qutebrowser"'
-
-# The boot marker held nothing, so boot reconnected in lan whatever the user had
-# chosen: Maximum came back as Standard after every reboot.
-want "the boot marker records the mode" tormarchy 'remember_connected "$mode"'
-want "connect falls back to the remembered mode" tormarchy 'mode=$(remembered_mode)'
-
-# The bridge fallback wrote bridge lines and never restarted tor, so it could
-# not have worked.
-want_next "the bridge fallback restarts tor onto the bridges" tormarchy \
-  'bridge_activate "$BRIDGE_STASH" >/dev/null 2>&1; then' "bridge_reload"
-
-# The published cookie copy was preferred by the very lookup meant to refresh it,
-# so after any tor restart the control port stayed dark.
-want "publishing reads tor's own cookie" tormarchy 'for candidate in "${TOR_COOKIES[@]}"; do'
-
-# Loopback v6 stays up, and the pre-connect state is saved once only.
-want "loopback IPv6 stays up while connected" tormarchy "printf '0' >\"\$IPV6_CONF/lo/disable_ipv6\""
-want "the IPv6 state is saved once per connection" tormarchy 'if [[ ! -e $IPV6_STATE_FILE ]]; then'
-
-echo
-echo "Panel tools"
-
-# Omarchy's rule is its own sender, never raw notify-send: the sender is what
-# applies the user's notification settings, do-not-disturb included.
-want "toasts go through omarchy-notification-send" Model.js '["omarchy-notification-send",'
-for f in Panel.qml Service.qml Model.js; do
-  reject "no raw notify-send in $f" "$f" '"notify-send"'
-done
-
-# The leak check makes real requests -- check.torproject.org, a direct IPv6
-# probe -- so it runs when asked and never on a schedule, like the latency
-# gauge's rule. A Timer that so much as mentions it is the start of a beacon.
+# The leak check makes real requests, so it runs when asked and never on a
+# schedule: a Timer that so much as mentions it is the start of a beacon.
 if python3 - <<'PY'
 import re, sys
 for name in ("Panel.qml", "Service.qml"):
@@ -346,142 +186,23 @@ for name in ("Panel.qml", "Service.qml"):
             if depth == 0:
                 break
             i += 1
-        if re.search(r"checkLeaks|doctorProcess|doctor", src[m.start():i]):
+        if re.search(r"checkLeaks|measure|doctor", src[m.start():i]):
             sys.exit(1)
 PY
-then ok "no Timer runs the leak check"; else bad "a Timer runs the leak check"; fi
-
-# Bridge lines are what a bridge exists to hide. argv is world-readable in
-# /proc, so they go to tormarchy over stdin and nowhere else: never a command
-# line, never a file the root helper is pointed at.
-want "bridge check takes no arguments" Service.qml '["bash", "-c", "exec tormarchy bridge check"]'
-want "bridge set takes no arguments" Service.qml '["bash", "-c", "exec tormarchy bridge set"]'
-want_next "bridge set's stdin is closed after the lines, which is its end of input" Service.qml \
-  'bridgeSetProcess.write(root._pendingBridgeText' 'bridgeSetProcess.stdinEnabled = false'
-want_next "so is bridge check's" Service.qml \
-  'bridgeCheckProcess.write(root._pendingBridgeText' 'bridgeCheckProcess.stdinEnabled = false'
-if python3 - <<'PY'
-import re, sys
-src = open("Service.qml").read()
-uses = [l.strip() for l in src.splitlines() if "_pendingBridgeText" in l]
-allowed = re.compile(r"^(property string _pendingBridgeText: \"\"|_pendingBridgeText = \"\"|root\._pendingBridgeText = (\"\"|text)"
-                     r"|if \(bridgeWorking \|\| busy \|\| _pendingBridgeText === \"\"\) return"
-                     r"|bridge(Set|Check)Process\.write\(root\._pendingBridgeText \+ \"\\n\"\))$")
-bad = [u for u in uses if not allowed.match(u)]
-if bad:
-    print("\n".join("    " + b for b in bad))
-    sys.exit(1)
-PY
-then ok "the pasted text is only stored, cleared, and written to stdin"
-else bad "the pasted text is used somewhere other than stdin (see above)"; fi
-# The clipboard is sent by whichever app copied last, as much as it likes, and
-# the shell process holds the whole bar. Read whole, an endless offer exhausts
-# it before the helper's limit is ever reached (HANCORE-linux, 11214). The read
-# is capped at the helper's own limit; tests/clipboard.js runs it for real.
-# An editable text field is a clipboard reader too: on Qt 6.10 and older it
-# reads the whole clipboard on every change, typing or not, with no limit on
-# size or time (HANCORE-linux, 11472). The panel lives for as long as the shell
-# does, so it creates none; tests/qml/load.py checks the live object tree.
-if grep -nE '^[[:space:]]*(SearchableDropdown|TextField|TextInput|TextEdit|TextArea|NumberField|MultiSelect)[[:space:]]*\{' Panel.qml; then
-  bad "the panel creates an editable text field (above)"
-else
-  ok "the panel creates no editable text field"
-fi
-# A Text left on its default format renders anything that looks like HTML as
-# rich text, and rich text loads images, from the network if a tag says so. The
-# panel shows text that came from outside (the leak check's answer, helper
-# messages), so every Text in it is plain.
-if python3 - <<'PY'
-import re, sys
-src = open("Panel.qml").read().split("\n")
-bad = []
-for i, line in enumerate(src):
-    if not re.search(r"(^|:)\s*Text \{\s*$", line):
-        continue
-    depth, j, found = 0, i, False
-    while j < len(src):
-        depth += src[j].count("{") - src[j].count("}")
-        if "textFormat: Text.PlainText" in src[j]:
-            found = True
-        if depth <= 0 and j > i:
-            break
-        j += 1
-    if not found:
-        bad.append(f"    Panel.qml:{i + 1}: {line.strip()}")
-if bad:
-    print("\n".join(bad))
-    sys.exit(1)
-PY
-then ok "every Text in the panel is plain text"
-else bad "a Text in the panel renders as rich text (above)"; fi
-want "the clipboard is read through the capped read" Service.qml 'clipboardProcess.command = Model.clipboardArgv()'
-reject "and never straight into the shell" Service.qml '["wl-paste"'
-helper_limit=$(sed -n 's/^BRIDGE_INPUT_BYTE_LIMIT=\([0-9]*\)$/\1/p' tormarchy)
-panel_limit=$(sed -n 's/^var BRIDGE_INPUT_LIMIT = \([0-9]*\)$/\1/p' Model.js)
-if [[ -n $helper_limit && $helper_limit == "$panel_limit" ]]; then
-  ok "a paste is capped at exactly what the helper reads ($helper_limit bytes)"
-else
-  bad "the paste cap ($panel_limit) is not the helper's limit ($helper_limit)"
-fi
-reject "the root helper takes no bridge file argument" tormarchy 'bridge set <file'
-want "the panel-readable summary is counts only" tormarchy 'bridge_counts "$BRIDGE_STASH" >"$staging"'
-want "setup brings an older bridge stash within the panel's reach" tormarchy 'chmod 0711 "$(dirname "$BRIDGE_STASH")"'
-
-# A bare exec applies its redirections to the whole process: one with
-# 2>/dev/null on it silences every later error message, die included.
-if grep -nE '^[[:space:]]*exec [0-9]+[<>&][^;]*2>/dev/null' tormarchy; then
-  bad "a bare exec redirects stderr for the rest of the process (above)"
-else
-  ok "no bare exec swallows stderr for the rest of the process"
-fi
+then ok "no Timer runs the leak check or a measurement"; else bad "a Timer runs the leak check or a measurement"; fi
 
 echo
-echo "The Omarchy menu"
+echo "Release"
 
-# The menu file is the user's, so it is written as the user: root writing into a
-# home directory follows whatever symlinks are there. sudo tormarchy menu add
-# goes to the person behind sudo, never to root's own home.
-want "menu edits run as the user, through runuser" tormarchy 'runuser -u "$user" -- env HOME="$home" "$SELF" menu "$verb"'
-want "and refuse to run as root for themselves" tormarchy 'die "run this as yourself, not as root"'
-# A file that does not parse already costs its owner every entry; one this made
-# unparseable would be worse. Checked before and after, and left alone if not.
-want "a file that does not parse is left alone" tormarchy 'does not parse as it is; fix it first, nothing was changed'
-want "and nothing is written that would not parse" tormarchy 'the menu would not parse after the change, so nothing was changed'
-want "uninstall takes the rows out" tormarchy 'menu_as_user "$SUDO_USER" remove'
-
-# The marketplace's security scan reads a script that downloads (curl) and also
-# runs an interpreter as one that may run what it fetched, and blocks it. A perl
-# one-liner to parse the menu file was enough to turn the verdict to
-# needs-fixes; sed -z does the same job without being an interpreter.
-for interpreter in perl python3 ruby node; do
-  if grep -qE "(^|[[:space:];|&(])$interpreter[[:space:]]" tormarchy; then
-    bad "tormarchy runs $interpreter, which the marketplace scan treats as running a download"
-  else
-    ok "tormarchy runs no $interpreter"
-  fi
-done
-
-echo
-echo "Panel copy"
-
-# Labels on the panel, never sentences: anything that explains or instructs is
-# a hover bubble. So a string longer than a label may only appear where it is
-# given to a tooltip.
-if python3 - <<'PY'
-import re, sys
-bad = []
-for n, line in enumerate(open("Panel.qml"), 1):
-    for text in re.findall(r'qsTr\("((?:[^"\\]|\\.)*)"\)', line):
-        if len(text) > 32 and not re.search(r"\b(tip|tooltipText)\s*:|wrapTip\(", line):
-            bad.append(f"    Panel.qml:{n}: {text}")
-if bad:
-    print("\n".join(bad))
-    sys.exit(1)
-PY
-then ok "no string on the panel is longer than a label, unless it is a bubble's"
-else bad "a sentence is on the panel itself (above); put it in a tooltip"; fi
-want "messages from the helper are shown cut to one line" Panel.qml "component Brief: Text {"
-want "and wrapped for their bubble, which draws one line however long" Panel.qml "text: Model.wrapTip(brief.full)"
+# Every action a workflow runs is pinned to a full commit.
+if grep -hE '^\s*-?\s*uses:' .github/workflows/*.yml | grep -vqE '@[0-9a-f]{40}( |$)'; then
+  bad "an action is not pinned to a full commit: $(grep -hE '^\s*-?\s*uses:' .github/workflows/*.yml | grep -vE '@[0-9a-f]{40}( |$)' | head -1)"
+else
+  ok "every action is pinned to a full commit"
+fi
+want "the release is signed keyless by its own workflow" .github/workflows/auto-release.yml 'cosign sign-blob --yes --bundle'
+want "with an OIDC identity to sign with" .github/workflows/auto-release.yml 'id-token: write'
+want "and tagged at the commit it was built from" .github/workflows/auto-release.yml 'git tag -a "v$VERSION" -m "v$VERSION" "${{ github.sha }}"'
 
 echo
 if (( failures == 0 )); then

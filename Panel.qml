@@ -4,20 +4,19 @@ import Quickshell.Io
 import qs.Commons
 import qs.Commons as Commons
 import qs.Ui
-import "Model.js" as Model
 
+// The bar widget and its panel. Drawing and input only: every label, verdict
+// and decision comes from tormarchyd as the service's `view`, and every click
+// goes back to it as a command.
 Panel {
   id: root
   moduleName: "tripleu.tor"
   ipcTarget: "tripleu.tor"
   manageIpc: false
 
-  property string focusSection: "header"  // "setup" | "header" | "newnym" | "exit" | "speed" | "mode"
+  property string focusSection: "header"  // "setup" | "header" | "exit" | "speed" | "newnym" | "leaks" | "bridges" | "mode"
 
-  // Follow the session's text direction. Without this an RTL locale keeps the
-  // Latin left-to-right order, so the onion, the wordmark and every row read
-  // backwards. childrenInherit pushes it down the whole tree, including the
-  // rows built by Repeaters.
+  // Follow the session's text direction, down the whole tree.
   LayoutMirroring.enabled: Qt.application.layoutDirection === Qt.RightToLeft
   LayoutMirroring.childrenInherit: true
   property int modeIndex: 0
@@ -25,102 +24,73 @@ Panel {
   // Which tool tile is open beneath its band: "" | "leaks" | "bridges".
   property string expandedTool: ""
 
-  // Every palette read goes through the Commons alias. Qt 6.12 ships a `Color`
-  // type of its own, and a bare `Color.accent` now resolves to that instead of
-  // the theme singleton -- it evaluates to undefined, and a colour property
-  // given undefined falls back to black. That is what painted the switch's
-  // "on" track black on a dark bar, so it looked as if it never turned on.
+  // Every palette read goes through the Commons alias: Qt 6.12 ships a `Color`
+  // type of its own that a bare `Color.accent` resolves to instead.
   readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
-  // Straight from the theme singleton: the bar exposes foreground, barForeground
-  // and urgent, but no accent, so there is nothing to prefer over it here.
   readonly property color accent: Commons.Color.accent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  // The onion's state, in order of what most needs saying.
-  //
-  // It only lights up once traffic is actually going through Tor. Bootstrapping
-  // is a distinct state with a pulsing core -- claiming "on" before the circuit
-  // exists is the one lie a Tor indicator must never tell. Browser-only with Tor
-  // up keeps the core but not the layers: Tor is there, the system is not routed
-  // through it. And rules applied with no Tor behind them is the kill switch
-  // holding the network shut, which is worth the urgent colour: the machine has
-  // gone quiet on purpose, and this is where the user will look to find out why.
-  readonly property bool barBlocked: tor.connected && !tor.torRunning
-  readonly property bool barRouted: tor.active && tor.connected && tor.torRunning
-  readonly property bool barBrowserOnly: tor.active && tor.effectiveMode === "socks"
-    && tor.torRunning && !tor.bootstrapping
-  readonly property bool barConnecting: tor.active && !barRouted && !barBrowserOnly && !barBlocked
+  readonly property var v: tor.view
 
+  // The onion's state comes from the daemon: lit only once traffic actually
+  // goes through Tor, pulsing while connecting, red while the kill switch holds.
+  readonly property bool barBlocked: v.bar === "blocked"
+  readonly property bool barRouted: v.bar === "routed"
+  readonly property bool barBrowserOnly: v.bar === "browser"
+  readonly property bool barConnecting: v.bar === "connecting"
   readonly property color barIconColor: barBlocked ? urgent : barForeground
   readonly property real barLayerOpacity: barBlocked || barRouted ? 1.0 : 0.45
 
-  // Our own directory, so the pre-setup path can point at the bundled
-  // ./setup without the helpers being installed yet.
-  readonly property string pluginDir: String(Qt.resolvedUrl("."))
-    .replace(/^file:\/\//, "").replace(/\/$/, "")
+  // Our own directory, so the pre-setup path can reach the bundled setup.
+  readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/$/, "")
 
-
-  // In every mode, browser-only included. ExitNodes is a torrc setting, so it
-  // steers every circuit tor builds -- the SOCKS circuits a browser-only
-  // browser uses just as much as the transparent ones. Hiding it there left an
-  // empty column in the header and took away a control that works.
-  //
-  // Deliberately NOT gated on torRunning. The exit tile is structural: hiding
-  // it while disconnected collapses a column and the panel reads as broken
-  // rather than as idle. It shows its placeholder and waits instead.
+  // In every mode: ExitNodes steers browser-only's circuits as much as the
+  // transparent ones. Structural, so not gated on tor running.
   readonly property bool showExit: tor.installed
   readonly property var recentExits: root.setting("recentExits", [])
 
   // The panel's only layout grid: three equal columns and two gutters.
-  //
-  // Every band derives its geometry from this, so column 3 begins at the same x
-  // in all of them. What this replaces was two competing systems -- the header
-  // and the latency row used a fixed rail width while the mode row took an
-  // actual third of the available width, so the right-hand column sat ~25px off
-  // and the panel read as crooked however the individual boxes were tweaked.
-  //
-  // Proportional rather than measured pixels: Style.space() is scaled per theme
-  // (about 1.23 on this display), so a literal 11 would render as 13.5 here and
-  // differently again elsewhere. Thirds are correct at every scale.
   readonly property real gridGap: Style.space(9)
+  readonly property real gapTight: gridGap
+  readonly property real gapSection: gridGap * 2
 
-  // Vertical rhythm, as multiples of that same gutter. Naming the two steps
-  // stops the spacing being re-guessed per section, which is what made the
-  // panel read as a pile of independently placed boxes.
-  readonly property real gapTight: gridGap          // a label to its control
-  readonly property real gapSection: gridGap * 2    // band to band, section to section
-
-  // Fixed sizes from the layout spec. Expressed through Style.space so they
-  // track the theme's spacing scale (about 1.23 here) and land on the intended
-  // pixel values at that scale instead of being hardcoded to one display.
-  readonly property real headerHeight: Style.space(52)   // 64px
-  readonly property real controlHeight: Style.space(30)  // 37px
-  readonly property real toggleWidth: Style.space(71)    // 88px
-  readonly property real surfaceHeight: Style.space(78)  // 96px
-  readonly property real gaugeCell: Style.space(91)      // 112px
-  readonly property real gaugeSize: Style.space(68)      // 84px
-  readonly property real metricsHeight: Style.space(39)  // 48px
-  readonly property real modeHeight: Style.space(42)     // 52px
-  readonly property real actionHeight: Style.space(29)   // 36px
-  readonly property real toolHeight: Style.space(42)     // 52px, the mode row's height
+  // Fixed sizes from the layout spec, through Style.space so they track the
+  // theme's spacing scale.
+  readonly property real headerHeight: Style.space(52)
+  readonly property real controlHeight: Style.space(30)
+  readonly property real toggleWidth: Style.space(71)
+  readonly property real surfaceHeight: Style.space(78)
+  readonly property real gaugeCell: Style.space(91)
+  readonly property real gaugeSize: Style.space(68)
+  readonly property real metricsHeight: Style.space(39)
+  readonly property real modeHeight: Style.space(42)
+  readonly property real toolHeight: Style.space(42)
   readonly property real hairline: Math.max(1, Style.space(1))
 
   readonly property color surfaceFill: Util.alpha(foreground, 0.05)
   readonly property color surfaceLine: Util.alpha(foreground, 0.22)
 
-  // One definition for both status surfaces. Declaring the fill and border once
-  // is what guarantees the latency card and New circuit are visually identical
-  // -- two separately styled boxes drift the moment either is touched.
+  // Tooltips the panel shows before the daemon can speak, wrapped by hand to
+  // what a bubble holds: the shell's tooltip draws one line however long.
+  readonly property string setupTip: "Once, in a terminal with sudo: installs tor\nand the helper. After that the switch never\nasks for a password."
+  readonly property string updateTip: "This plugin was updated, but the helper it\nruns was not. Updating runs setup again,\nonce, in a terminal."
+  readonly property string leakTip: "Asks check.torproject.org whether you are\ncoming from Tor, tries an IPv6 host directly,\nand checks DNS, forwarding and the clock. Runs\nonly when you ask, and takes up to half a\nminute."
+  readonly property string bridgesTip: "For networks that block Tor. Paste bridge\nlines from the clipboard to use them."
+  readonly property string bridgesHelpTip: "Get bridges at bridges.torproject.org or from\n@GetBridgesBot on Telegram. Copy the lines,\nthen paste them here."
+  readonly property string invalidTip: "Copy only the lines that start with a\ntransport, like obfs4, then paste again."
+
+  // One definition for both status surfaces, so they stay identical.
   component Surface: Rectangle {
     color: root.surfaceFill
     border.width: root.hairline
     border.color: root.surfaceLine
     radius: Style.cornerRadius
   }
-  // A tool's tile in band 4: glyph, title, one line of state. Selecting it opens
-  // the tool beneath the band.
+
+  // A tool's tile: glyph, title, one line of state. Selecting it opens the
+  // tool beneath the band.
   component ToolTile: Surface {
     id: tile
     property string section: ""
@@ -129,7 +99,6 @@ Panel {
     property string title: ""
     property string subtitle: ""
     property color subtitleColor: root.dim
-    // What the tool does, for the hover bubble. Never on the tile itself.
     property string tip: ""
     signal activated()
 
@@ -142,8 +111,8 @@ Panel {
     border.color: hot || open ? Util.alpha(root.foreground, 0.55) : root.surfaceLine
 
     Text {
-      textFormat: Text.PlainText
       id: tileGlyph
+      textFormat: Text.PlainText
       anchors.left: parent.left
       anchors.leftMargin: Style.space(12)
       anchors.verticalCenter: parent.verticalCenter
@@ -202,9 +171,7 @@ Panel {
     }
   }
 
-  // No sentences on the panel. A label says what something is; anything that
-  // explains or instructs goes in a hover bubble -- this dot where nothing else
-  // on screen can carry it.
+  // No sentences on the panel: this dot carries one in its bubble.
   component InfoDot: Text {
     id: info
     property string tip: ""
@@ -229,19 +196,19 @@ Panel {
     }
   }
 
-  // A message as one short line -- a warning, an error from the helper -- with
-  // the whole of it in the bubble. Helper errors run to two sentences, and a
-  // wrapped paragraph in red is exactly what this panel does not do.
+  // A message as one short line, with the whole of it in the bubble. The
+  // daemon sends both halves.
   component Brief: Text {
     id: brief
     property string full: ""
-    property string short: Model.brief(full)
+    property string short: ""
+    property string tip: full
     visible: full !== ""
     width: parent ? parent.width : implicitWidth
     elide: Text.ElideRight
     maximumLineCount: 1
     textFormat: Text.PlainText
-    text: short
+    text: short !== "" ? short : full
     color: root.urgent
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
@@ -254,14 +221,13 @@ Panel {
     }
 
     PanelToolTip {
-      visible: briefMouse.containsMouse && brief.full !== brief.short
-      text: Model.wrapTip(brief.full)
+      visible: briefMouse.containsMouse && brief.full !== brief.text
+      text: brief.tip
       fontFamily: root.fontFamily
     }
   }
 
-  // A result in a word, with a glyph for how it went and the detail on hover:
-  // a leak check, or a transport in the bridge set.
+  // A result in a word, with a glyph for how it went and the detail on hover.
   component Chip: Surface {
     id: chip
     property string glyph: ""
@@ -287,9 +253,9 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         anchors.verticalCenter: parent.verticalCenter
         text: chip.label
-        textFormat: Text.PlainText
         color: chip.tint
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
@@ -310,30 +276,16 @@ Panel {
     }
   }
 
-  // Ticks only while the panel is open, so "checked 2 min ago" stays true.
-  property double now: Date.now()
-  Timer {
-    interval: 30000
-    repeat: true
-    running: root.opened
-    triggeredOnStart: true
-    onTriggered: root.now = Date.now()
-  }
-
   function gridColumn(available) { return (available - gridGap * 2) / 3 }
   function gridSpan2(available) { return gridColumn(available) * 2 + gridGap }
 
-  // A labelled figure. Declared inline because it is only ever used by the
-  // stats strip below and gains nothing from being its own file.
+  // A labelled figure in the stats strip.
   component StatCell: Column {
     property string label: ""
     property string value: ""
     property color valueColor: root.foreground
 
     spacing: Style.space(2)
-    // Nothing leaves the cell. Without this a long value simply draws over the
-    // neighbouring cell, which is how "62 KB" and "15s" ended up printed on
-    // top of each other.
     clip: true
 
     Text {
@@ -351,9 +303,6 @@ Panel {
       textFormat: Text.PlainText
       width: parent.width
       elide: Text.ElideRight
-      // A cell may supply its figure as child content instead of a string --
-      // the circuit path does. An empty Text still claims a line of height in
-      // a Column, which would push that content down out of alignment.
       visible: text !== ""
       text: parent.value
       color: parent.valueColor
@@ -362,15 +311,12 @@ Panel {
     }
   }
 
-
-  // Reading order of the bands, skipping whatever is not on screen. Rebuilt
-  // each call because tor stopping or socks mode removes sections under the
-  // cursor.
+  // Reading order of the bands, skipping whatever is not on screen.
   function navOrder() {
     var order = ["header"]
     if (showExit) order.push("exit")
     order.push("speed")
-    if (tor.canNewCircuit) order.push("newnym")
+    if (v.canNewCircuit) order.push("newnym")
     order.push("leaks")
     order.push("bridges")
     order.push("mode")
@@ -383,37 +329,32 @@ Panel {
       return
     }
     if (focusSection === "setup") focusSection = "header"
-    // A section can vanish under the cursor — tor stopping removes "exit".
     if (navOrder().indexOf(focusSection) === -1) focusSection = "header"
-    modeIndex = Math.max(0, Model.MODE_ORDER.indexOf(tor.effectiveMode))
+    for (var i = 0; i < v.modes.length; i++) if (v.modes[i].selected) modeIndex = i
   }
 
   function moveCursor(dx, dy) {
     cursorActive = true
     ensureCursor()
     if (focusSection === "setup") return
-
     if (dy !== 0) {
       var order = navOrder()
       var at = Math.max(0, order.indexOf(focusSection))
       focusSection = order[Math.max(0, Math.min(order.length - 1, at + dy))]
       return
     }
-
-    if (dx === 0) return
-    if (focusSection === "mode") {
-      modeIndex = Math.max(0, Math.min(Model.MODE_ORDER.length - 1, modeIndex + dx))
-    }
+    if (dx !== 0 && focusSection === "mode")
+      modeIndex = Math.max(0, Math.min(v.modes.length - 1, modeIndex + dx))
   }
 
   function activateCursor() {
     ensureCursor()
     if (focusSection === "setup") runSetup()
-    else if (focusSection === "header") toggleConnected()
+    else if (focusSection === "header") tor.toggle()
     else if (focusSection === "newnym") tor.newCircuit()
     else if (focusSection === "exit") exitPicker.toggle()
-    else if (focusSection === "speed") tor.measureSpeed()
-    else if (focusSection === "mode") tor.setMode(Model.MODE_ORDER[modeIndex])
+    else if (focusSection === "speed") tor.measure()
+    else if (focusSection === "mode" && v.modes[modeIndex]) tor.setMode(v.modes[modeIndex].value)
     else if (focusSection === "leaks") openLeakCheck()
     else if (focusSection === "bridges") toggleTool("bridges")
   }
@@ -422,25 +363,18 @@ Panel {
     expandedTool = expandedTool === name ? "" : name
     // A paste is only ever previewed while its section is on screen.
     if (expandedTool !== "bridges") tor.cancelBridges()
-    else tor.loadBridgeDetail()
   }
 
-  // Opening the leak check runs it, unless a result is already on screen: one
-  // that is there describes the current state, because every routing change
-  // clears it. Running it again is the explicit button beneath.
+  // Opening the leak check runs it, unless a result is already on screen: any
+  // routing change clears it, so one that is there is current.
   function openLeakCheck() {
     if (expandedTool === "leaks") {
       expandedTool = ""
       return
     }
     expandedTool = "leaks"
-    if (!tor.leakResult && !tor.checkingLeaks) tor.checkLeaks()
-  }
-
-  // canToggle rather than !busy: a connect still waiting on tor's bootstrap can
-  // be switched off, which cancels it.
-  function toggleConnected() {
-    if (tor.installed && tor.canToggle) tor.toggleConnected()
+    tor.cancelBridges()
+    if (!v.leak.hasResult && !v.leak.checking) tor.checkLeaks()
   }
 
   function chooseExit(code) {
@@ -449,15 +383,13 @@ Panel {
     if (cc !== "auto") persistRecentExit(cc)
   }
 
-  // Same persistence route tailscale uses for its recent Mullvad regions:
-  // rewrite this widget's own entry in shell.json, keeping every other setting.
+  // This widget's own entry in shell.json, keeping every other setting. The
+  // daemon reads the list back through the settings it is sent.
   function persistRecentExit(code) {
-    var cc = String(code || "")
-    if (cc === "") return
-    var next = [cc]
+    var next = [code]
     for (var i = 0; i < recentExits.length && next.length < 4; i++) {
       var existing = String(recentExits[i] || "")
-      if (existing !== "" && existing !== cc && next.indexOf(existing) === -1) next.push(existing)
+      if (existing !== "" && existing !== code && next.indexOf(existing) === -1) next.push(existing)
     }
     if (!bar || !bar.shell || typeof bar.shell.updateEntryInline !== "function") return
     var entry = { id: moduleName }
@@ -470,29 +402,24 @@ Panel {
     if (!showExit) return
     cursorActive = true
     focusSection = "exit"
-    tor.loadExitCountries()
+    tor.loadExits()
     exitPicker.open()
   }
 
-
-  // Setup is the one genuinely interactive step (pacman, a polkit policy, a
-  // group change), so it gets a real terminal instead of a silent pkexec.
+  // Setup is the one interactive step (pacman, polkit, a group change), so it
+  // gets a real terminal, never a silent pkexec: it refuses to run through
+  // polkit at all.
   function runSetup() {
     if (!bar) return
     close()
-    // A real terminal, not pkexec: setup refuses to run through polkit, since
-    // the single action pins the program path and not its arguments, so a
-    // passwordless grant for connect would otherwise cover uninstall too.
     bar.run("omarchy-launch-floating-terminal-with-presentation "
-      + Util.shellQuote("sudo " + pluginDir + "/tormarchy setup"))
+      + Util.shellQuote("sudo " + pluginDir + "/setup"))
   }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  // Measuring runs only while the panel is on screen. Closing it stops the
-  // timer, so the plugin never makes a request nobody asked for and nobody
-  // would see.
+  // Measuring and the detail reads run only while the panel is on screen.
   onOpenedChanged: {
     tor.watch(opened)
     if (!opened) {
@@ -501,19 +428,13 @@ Panel {
     }
     cursorActive = false
     if (panelFlick) panelFlick.contentY = 0
-    tor.refresh()
-    // Cheap to skip, expensive to fetch: only walk the consensus once per
-    // shell session, and only when an exit could actually be chosen.
-    if (showExit && !tor.exitCountriesLoaded) tor.loadExitCountries()
     ensureCursor()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
-  // The plugin's service, which the shell runs once for every monitor's widget:
-  // one status read, one toast, one control-port session, however many bars.
-  // Omarchy 4.0.4 and later hand it over through the built-in bar. Anything
-  // else -- an older shell, a replacement bar -- gets this widget's own copy,
-  // which is idle whenever the shared one exists.
+  // The plugin's service, which the shell runs once for every monitor's widget.
+  // Anything else -- an older shell, a replacement bar -- gets this widget's own
+  // copy, idle whenever the shared one exists.
   readonly property var sharedTor: bar && bar.shell && typeof bar.shell.serviceFor === "function"
     ? bar.shell.serviceFor("tripleu.tor") : null
   readonly property var tor: sharedTor || ownTor
@@ -534,16 +455,10 @@ Panel {
   Connections {
     target: tor
     function onInstalledChanged() { root.ensureCursor() }
-    function onConnectedChanged() { root.ensureCursor() }
-    function onCanNewCircuitChanged() { root.ensureCursor() }
-    function onModeChanged() { root.ensureCursor() }
+    function onViewChanged() { if (root.opened) root.ensureCursor() }
   }
 
-  // Quickshell's own IpcHandler, not Omarchy's ShellIpc. ShellIpc is newer than
-  // Omarchy 4.0.4, the release most machines run, and a widget naming a type
-  // its shell lacks fails to load and is left out of the bar without a word.
-  // omarchy-shell reaches an IpcHandler on every version: through qs ipc on
-  // 4.0.x, and on later shells by falling back to qs ipc after its own socket.
+  // Quickshell's own IpcHandler, which every Omarchy 4 shell reaches.
   IpcHandler {
     target: root.ipcTarget
     function open(): void { root.open() }
@@ -552,17 +467,16 @@ Panel {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
     function refresh(): string { tor.refresh(); return "ok" }
-    function connect(): string { tor.connect(tor.effectiveMode); return "ok" }
+    function connect(): string { tor.connect(); return "ok" }
     function disconnect(): string { tor.disconnect(); return "ok" }
     function newCircuit(): string {
-      if (!tor.canNewCircuit) return "tor is not connected"
+      if (!root.v.canNewCircuit) return "tor is not connected"
       tor.newCircuit()
       return "ok"
     }
-    function toggleTor(): string { root.toggleConnected(); return "ok" }
-    function status(): string { return tor.statusText }
-    // Asked for by name, so it always shows the check and runs it -- never the
-    // `d` key's toggle, which would fold an open check away instead.
+    function toggleTor(): string { tor.toggle(); return "ok" }
+    function status(): string { return root.v.statusText }
+    // Asked for by name, so it always shows the check and runs it.
     function checkLeaks(): string {
       root.open()
       root.focusSection = "leaks"
@@ -583,14 +497,8 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // The mark alone, no label: the state is in the icon itself, and the
-    // panel is one click away for anything more specific. The tooltip says it
-    // in words for anyone who has not learned the icon yet.
-    tooltipText: tor.statusText
-    // No position of its own: the mark centres itself on whatever box the
-    // shell gives it (see TorIcon). The size is the bar's icon size where the
-    // shell has one; Omarchy 4.0.x has only the 16px canvas its glyphs are
-    // drawn about 12px inside, so it gets the same three quarters.
+    // The mark alone: the state is in the icon, and in words in the tooltip.
+    tooltipText: root.v.statusText
     iconComponent: Component {
       TorIcon {
         iconSize: Style.bar.iconSize || Math.round((Style.bar.iconCanvas || 16) * 0.75)
@@ -601,8 +509,8 @@ Panel {
       }
     }
     onPressed: function(buttonCode) {
-      if (buttonCode === Qt.RightButton) root.toggleConnected()
-      else if (buttonCode === Qt.MiddleButton) { if (tor.canNewCircuit) tor.newCircuit() }
+      if (buttonCode === Qt.RightButton) tor.toggle()
+      else if (buttonCode === Qt.MiddleButton) { if (root.v.canNewCircuit) tor.newCircuit() }
       else root.toggle()
     }
   }
@@ -629,10 +537,10 @@ Panel {
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
         var key = String(t || "").toLowerCase()
-        if (key === "t") root.toggleConnected()
-        else if (key === "n") { if (tor.canNewCircuit) tor.newCircuit() }
+        if (key === "t") tor.toggle()
+        else if (key === "n") { if (root.v.canNewCircuit) tor.newCircuit() }
         else if (key === "e") root.openExitPicker()
-        else if (key === "s") tor.measureSpeed()
+        else if (key === "s") tor.measure()
         else if (key === "r") tor.refresh()
         else if (key === "d") { root.cursorActive = true; root.focusSection = "leaks"; root.openLeakCheck() }
         else if (key === "b") { root.cursorActive = true; root.focusSection = "bridges"; root.toggleTool("bridges") }
@@ -654,8 +562,6 @@ Panel {
           width: panelFlick.width
           spacing: root.gapSection
 
-          // Connected layout, in three bands: identity and controls, the
-          // circuit's measured latency, then the mode selector.
           Column {
             id: connectedBody
             visible: tor.installed
@@ -665,9 +571,7 @@ Panel {
             readonly property real gap: root.gridGap
             readonly property real bandHeight: root.headerHeight
 
-            // Band 1 -- logo and name, then the switch and the exit location
-            // side by side on the right. All three are full band height, so the
-            // row reads as three tiles rather than a stack.
+            // Band 1: the mark and name, then the switch and the exit.
             Row {
               id: topRow
               width: parent.width
@@ -675,12 +579,7 @@ Panel {
 
               readonly property real switchWidth: root.toggleWidth
               readonly property real countryWidth: root.gridColumn(width)
-              // The shell's own control height, so these sit the same as every
-              // other control in the bar's panels rather than as slabs.
               readonly property real controlHeight: root.controlHeight
-              // Brand and switch together fill columns 1 and 2 exactly, so the
-              // switch's right edge lands on the column 2 boundary and the exit
-              // tile starts precisely at column 3.
               readonly property real brandWidth: root.gridSpan2(width) - switchWidth - spacing
 
               Item {
@@ -688,15 +587,11 @@ Panel {
                 height: connectedBody.bandHeight
                 clip: true
 
-                // The mark is capped short of the column so there is a clear
-                // gap before the toggle, rather than the wordmark growing until
-                // it touches it.
                 Row {
                   anchors.verticalCenter: parent.verticalCenter
                   spacing: Style.space(8)
 
-                  readonly property real markCap: Math.min(topRow.brandWidth - Style.space(16),
-                                                           Style.space(193))
+                  readonly property real markCap: Math.min(topRow.brandWidth - Style.space(16), Style.space(193))
 
                   TorIcon {
                     anchors.verticalCenter: parent.verticalCenter
@@ -712,10 +607,8 @@ Panel {
                 }
               }
 
-              // The switch tile. Its caption does double duty: the live
-              // bootstrap percentage while connecting, the plain state
-              // otherwise. That percentage is the one number worth having
-              // during the slow part, and it had nowhere to appear before.
+              // The switch tile: its caption is the bootstrap percentage while
+              // connecting, the plain state otherwise.
               Column {
                 width: topRow.switchWidth
                 spacing: Style.space(3)
@@ -724,54 +617,43 @@ Panel {
                   textFormat: Text.PlainText
                   width: parent.width
                   horizontalAlignment: Text.AlignHCenter
-                  // Still a percentage after bootstrap, while connect proves a
-                  // route: "ON" only once traffic has actually moved over.
-                  readonly property bool settling: tor.bootstrapping || (root.barConnecting && tor.torRunning)
-                  text: settling ? tor.bootstrap + "%"
-                    : (tor.active ? qsTr("ON") : qsTr("OFF"))
-                  color: settling ? root.foreground : root.dim
+                  text: root.v.switchCaption
+                  color: root.v.switchCaptionLit ? root.foreground : root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.letterSpacing: 0.8
                 }
 
-                // Just the track. The bordered tile that used to sit around it
-                // was a box drawn around another box; the switch already reads
-                // as a control on its own.
                 Item {
                   width: parent.width
                   height: topRow.controlHeight
 
                   ToggleSwitch {
                     anchors.centerIn: parent
-                    checked: tor.active
-                    busy: tor.busy
+                    checked: root.v.active
+                    busy: root.v.busy
                     hasCursor: root.cursorActive && root.focusSection === "header"
                     foreground: root.foreground
                     accent: root.accent
-                    onToggled: root.toggleConnected()
+                    onToggled: tor.toggle()
                   }
                 }
               }
 
-              // The dropdown's own trigger is the tile -- no wrapper button
-              // whose click would need forwarding into it.
+              // The dropdown's own trigger is the tile. Dropdown, not
+              // SearchableDropdown: that one carries an editable TextField, and
+              // on Qt 6.10 and older every editable text field reads the whole
+              // clipboard each time it changes.
               Column {
                 width: topRow.countryWidth
                 spacing: Style.space(3)
                 visible: root.showExit
 
-                // "EXIT" while idle; once a circuit exists, the country Tor
-                // actually chose. The control below is the *request* -- on
-                // Automatic it says nothing about where you came out, and this
-                // is where that gets answered.
                 Text {
                   textFormat: Text.PlainText
                   width: parent.width
                   elide: Text.ElideRight
-                  text: tor.circuitReady && tor.exitCountry !== ""
-                    ? qsTr("EXIT · %1").arg(tor.exitCountry.toUpperCase())
-                    : qsTr("EXIT")
+                  text: root.v.exitCaption
                   horizontalAlignment: Text.AlignLeft
                   color: root.dim
                   font.family: root.fontFamily
@@ -779,13 +661,6 @@ Panel {
                   font.letterSpacing: 0.8
                 }
 
-                // Dropdown, not SearchableDropdown: the searchable one carries
-                // an editable TextField, created with the panel and alive while
-                // it is hidden, and on Qt 6.10 and older every editable text
-                // field reads the whole clipboard each time it changes, with no
-                // limit on size or time -- anything that copies could stall or
-                // exhaust the shell without anyone pasting. Recent countries
-                // come first, so the list stays short where it counts.
                 Dropdown {
                   id: exitPicker
                   width: topRow.countryWidth
@@ -793,8 +668,8 @@ Panel {
                   showLabel: false
                   foreground: root.foreground
                   fontFamily: root.fontFamily
-                  options: Model.exitOptions(tor.exitCountries, root.recentExits, tor.excludedExits, tor.requestedExit)
-                  value: tor.requestedExit === "" ? "auto" : tor.requestedExit
+                  options: root.v.exitOptions
+                  value: root.v.exitValue
                   hasCursor: root.cursorActive && root.focusSection === "exit"
                   onChanged: function(value) { root.chooseExit(value) }
                   onHovered: function(isHovered) {
@@ -805,32 +680,23 @@ Panel {
             }
 
             // What the status reports as wrong, said where it will be read.
-            // The one that matters most is the kill switch holding: rules on,
-            // tor gone, the network shut on purpose. The switch still reads ON
-            // then, correctly, and without this nothing on screen explained why
-            // the machine had gone quiet.
             Brief {
-              full: tor.warnings.length > 0 ? String(tor.warnings[0]) : ""
-              short: Model.briefWarning(full)
+              full: root.v.warning.full
+              short: root.v.warning.short
             }
 
-            // This plugin's helper is newer than the installed one. Setup again
-            // is the only way it gets there, and it needs a terminal.
             Button {
-              visible: tor.helperStale
-              text: qsTr("Update helper")
+              visible: root.v.helperStale
+              text: "Update helper"
               bordered: true
               focusable: false
               foreground: root.foreground
               fontFamily: root.fontFamily
-              tooltipText: Model.wrapTip(qsTr("This plugin was updated, but the helper it runs was not. Updating runs setup again, once, in a terminal."))
+              tooltipText: root.updateTip
               onClicked: root.runSetup()
             }
 
-            // Band 2 -- two paired surfaces of identical height and border:
-            // the latency card, and New circuit beside it. They are built from
-            // the same Surface component rather than styled separately, which
-            // is the only way to be sure they stay identical.
+            // Band 2: the latency card, and New circuit beside it.
             Row {
               id: speedRow
               width: parent.width
@@ -845,9 +711,6 @@ Panel {
                 height: root.surfaceHeight
                 clip: true
 
-                // The gauge gets a fixed cell with a hairline on its right; the
-                // value takes everything left over. Together they fill the card,
-                // so there is no dead middle region.
                 Item {
                   id: gaugeCell
                   width: root.gaugeCell
@@ -856,13 +719,12 @@ Panel {
                   SpeedGauge {
                     anchors.centerIn: parent
                     size: root.gaugeSize
-                    value: Model.latencyFraction(tor.latencyMs)
-                    busy: tor.measuringSpeed
+                    value: root.v.latency.fraction
+                    busy: root.v.latency.measuring
                     color: root.foreground
                     trackColor: Util.alpha(root.foreground, 0.18)
                   }
 
-                  // Separator, not a border: only the inner edge is drawn.
                   Rectangle {
                     anchors.right: parent.right
                     anchors.top: parent.top
@@ -884,15 +746,12 @@ Panel {
                     width: parent.width - Style.space(16)
                     spacing: Style.space(3)
 
-                    // The reading appears here and only here. It used to be
-                    // printed inside the gauge as well, which said the same
-                    // thing twice in one card.
                     Text {
                       textFormat: Text.PlainText
                       width: parent.width
                       horizontalAlignment: Text.AlignHCenter
                       elide: Text.ElideRight
-                      text: Model.formatLatency(tor.latencyMs)
+                      text: root.v.latency.text
                       color: root.foreground
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.displayLarge
@@ -904,9 +763,8 @@ Panel {
                       horizontalAlignment: Text.AlignHCenter
                       elide: Text.ElideRight
                       visible: text !== ""
-                      text: tor.speedError !== "" ? Model.brief(tor.speedError, 22)
-                        : (tor.measuringSpeed ? qsTr("Measuring…") : Model.latencyVerdict(tor.latencyMs))
-                      color: tor.speedError !== "" ? root.urgent : root.dim
+                      text: root.v.latency.caption
+                      color: root.v.latency.captionError ? root.urgent : root.dim
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
                     }
@@ -916,20 +774,17 @@ Panel {
                 MouseArea {
                   anchors.fill: parent
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: tor.measureSpeed()
+                  onClicked: tor.measure()
                 }
               }
 
-              // Same Surface, so the geometry and border cannot diverge from
-              // the card. Disabled reduces opacity only -- the surface keeps
-              // its exact size either way.
               Surface {
                 id: newCircuit
                 width: speedRow.circuitWidth
                 height: root.surfaceHeight
                 clip: true
 
-                readonly property bool available: tor.canNewCircuit
+                readonly property bool available: root.v.canNewCircuit
                 readonly property bool hot: circuitHover.containsMouse
                   || (root.cursorActive && root.focusSection === "newnym")
 
@@ -942,7 +797,7 @@ Panel {
                   width: parent.width - Style.space(12)
                   horizontalAlignment: Text.AlignHCenter
                   wrapMode: Text.WordWrap
-                  text: qsTr("New circuit")
+                  text: "New circuit"
                   color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
@@ -962,40 +817,31 @@ Panel {
               }
             }
 
-            // The stats strip. Everything here comes from Tor's own control
-            // port, which is why it can show the whole path and not just the
-            // exit: nothing else on the bar has access to this.
+            // The stats strip, all from Tor's own control port.
             Row {
               id: statsRow
               width: parent.width
               height: root.metricsHeight
               spacing: connectedBody.gap
-              // circuitReady, not connected: browser-only has a real circuit with a
-              // real path and was hiding all three figures because it installs no
-              // rules, and in the routed modes this drops the strip the moment the
-              // switch goes off instead of leaving a circuit on screen under it.
-              visible: tor.circuitReady && tor.path.length > 0
+              visible: root.v.stats.visible
               clip: true
 
-              // Thirds that add up, rather than three hand-picked widths that
-              // did not. Every cell elides inside its share.
               readonly property real cellWidth: root.gridColumn(width)
 
               StatCell {
                 width: statsRow.cellWidth
-                label: qsTr("CIRCUIT")
+                label: "CIRCUIT"
                 value: ""
 
-                // The signature Tor view: guard, middle, exit. Rendered as hops
-                // with arrows rather than a plain string so the exit, the only
-                // one the outside world sees, can carry full weight.
+                // Guard, middle, exit: the exit, the only one the outside world
+                // sees, at full weight.
                 Row {
                   width: parent.width
                   spacing: Style.space(3)
                   clip: true
 
                   Repeater {
-                    model: Model.pathHops(tor.path)
+                    model: root.v.stats.hops
 
                     Row {
                       required property var modelData
@@ -1007,7 +853,7 @@ Panel {
                         textFormat: Text.PlainText
                         anchors.verticalCenter: parent.verticalCenter
                         visible: index > 0
-                        text: "\u2192"
+                        text: "→"
                         color: Util.alpha(root.foreground, 0.45)
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
@@ -1016,9 +862,9 @@ Panel {
                       Text {
                         textFormat: Text.PlainText
                         anchors.verticalCenter: parent.verticalCenter
-                        text: modelData
+                        text: modelData.label
                         color: root.foreground
-                        opacity: index === tor.path.length - 1 ? 1.0 : 0.6
+                        opacity: modelData.exit ? 1.0 : 0.6
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.bodySmall
 
@@ -1030,11 +876,9 @@ Panel {
                           acceptedButtons: Qt.NoButton
                         }
 
-                        // Which relay this is, from the consensus: role, where
-                        // it is, its name, how fast, what it is trusted with.
                         PanelToolTip {
                           visible: hopMouse.containsMouse
-                          text: Model.hopTooltip(tor.hops[index] || null, index, tor.path.length, tor.path[index])
+                          text: modelData.tip
                           fontFamily: root.fontFamily
                         }
                       }
@@ -1045,27 +889,18 @@ Panel {
 
               StatCell {
                 width: statsRow.cellWidth
-                label: qsTr("TRAFFIC")
-                // Single space between the two figures: the wide gap was what
-                // pushed this past its cell in the first place.
-                value: "\u2193 " + Model.formatBytes(tor.bytesRead)
-                            + " \u2191 " + Model.formatBytes(tor.bytesWritten)
+                label: "TRAFFIC"
+                value: root.v.stats.traffic
               }
 
               StatCell {
                 width: statsRow.cellWidth
-                // "AGE" not "CIRCUIT AGE" -- the column sits under a heading
-                // that already says circuit, and the longer label was the
-                // widest thing in the row.
-                label: qsTr("AGE")
-                value: Model.formatAge(tor.circuitAgeSec)
+                label: "AGE"
+                value: root.v.stats.age
               }
             }
 
-            // Band 4 -- the tools: the leak check across two columns, bridges
-            // in the third, on the same grid and Surface as the latency card so
-            // the band lines up with everything above it. Each opens beneath
-            // the band rather than in a popup, so it scrolls with the panel.
+            // Band 4: the tools.
             Row {
               id: toolsRow
               width: parent.width
@@ -1074,16 +909,12 @@ Panel {
               ToolTile {
                 width: root.gridSpan2(toolsRow.width)
                 section: "leaks"
-                glyph: tor.checkingLeaks ? "󰔟"
-                  : (tor.leakResult ? Model.doctorGlyph(Model.doctorOverall(tor.leakResult)) : "󰕥")
-                glyphColor: Model.doctorOverall(tor.leakResult) === "fail" ? root.urgent : root.foreground
-                title: qsTr("Leak check")
-                subtitle: tor.checkingLeaks ? qsTr("Checking…")
-                  : (tor.leakError !== "" ? Model.brief(tor.leakError, 24)
-                  : (tor.leakResult ? Model.doctorSummary(tor.leakResult) + " · " + Model.formatAgo((root.now - tor.leakCheckedAtMs) / 1000)
-                  : qsTr("Not run yet")))
-                subtitleColor: tor.leakError !== "" ? root.urgent : root.dim
-                tip: Model.wrapTip(qsTr("Asks check.torproject.org whether you are coming from Tor, tries an IPv6 host directly, and checks DNS, forwarding and the clock. Runs only when you ask, and takes up to half a minute."))
+                glyph: root.v.leak.glyph
+                glyphColor: root.v.leak.failed ? root.urgent : root.foreground
+                title: "Leak check"
+                subtitle: root.v.leak.subtitle
+                subtitleColor: root.v.leak.subtitleError ? root.urgent : root.dim
+                tip: root.leakTip
                 onActivated: root.openLeakCheck()
               }
 
@@ -1091,15 +922,14 @@ Panel {
                 width: root.gridColumn(toolsRow.width)
                 section: "bridges"
                 glyph: "󰘘"
-                title: qsTr("Bridges")
-                subtitle: Model.bridgeStateLabel(tor.bridgeState, tor.bridgeDetail)
-                tip: Model.wrapTip(qsTr("For networks that block Tor. Paste bridge lines from the clipboard to use them."))
+                title: "Bridges"
+                subtitle: root.v.bridges.subtitle
+                tip: root.bridgesTip
                 onActivated: root.toggleTool("bridges")
               }
             }
 
-            // The leak check's results: one chip per check, named in a word,
-            // with what it found in the bubble.
+            // The leak check's results: one chip per check.
             Column {
               id: leakDetail
               visible: root.expandedTool === "leaks"
@@ -1107,18 +937,18 @@ Panel {
               spacing: Style.space(8)
 
               Flow {
-                visible: !!tor.leakResult
+                visible: root.v.leak.hasResult
                 width: parent.width
                 spacing: Style.space(6)
 
                 Repeater {
-                  model: tor.leakResult ? tor.leakResult.checks : []
+                  model: root.v.leak.checks
 
                   Chip {
                     required property var modelData
-                    glyph: Model.doctorGlyph(modelData.status)
-                    label: Model.checkLabel(modelData)
-                    tip: Model.checkTip(modelData)
+                    glyph: modelData.glyph
+                    label: modelData.label
+                    tip: modelData.tip
                     tint: modelData.status === "fail" ? root.urgent
                       : (modelData.status === "skip" ? root.dim : root.foreground)
                   }
@@ -1126,8 +956,8 @@ Panel {
               }
 
               Button {
-                visible: !tor.checkingLeaks
-                text: tor.leakResult ? qsTr("Check again") : qsTr("Check now")
+                visible: !root.v.leak.checking
+                text: root.v.leak.hasResult ? "Check again" : "Check now"
                 bordered: true
                 focusable: false
                 foreground: root.foreground
@@ -1137,78 +967,64 @@ Panel {
             }
 
             // Bridges: what is set up and whether this machine can run it, then
-            // a way to change it that never puts a bridge line on a command
-            // line. A paste is read straight off the clipboard, shown as counts
-            // for a yes or no, and handed to tormarchy over stdin.
+            // a way to change it that never puts a bridge line on a command line.
             Column {
               id: bridgeSection
               visible: root.expandedTool === "bridges"
               width: parent.width
               spacing: Style.space(8)
 
-              readonly property var current: tor.bridgeDetail
-              readonly property var preview: tor.bridgePreview
-              readonly property var missing: Model.missingTransports(preview)
-              readonly property bool canApply: !!preview && missing.length === 0
-                && preview.invalidLines === 0 && !tor.busy && !tor.bridgeWorking
-              // The paste on its way in, else the set already saved.
-              readonly property var shown: preview ? preview : (current && current.ok ? current : null)
+              readonly property var b: root.v.bridges
 
               Text {
                 textFormat: Text.PlainText
-                visible: !!bridgeSection.preview
-                text: qsTr("Pasted · %1").arg(Model.bridgeCountText(bridgeSection.preview))
+                visible: bridgeSection.b.hasPreview
+                text: bridgeSection.b.previewText
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
               }
 
-              // One chip per transport. One this machine cannot run is the
-              // usual reason bridges "do nothing", so it is marked where it is
-              // listed, with what to install in its bubble.
               Flow {
-                visible: !!bridgeSection.shown && (bridgeSection.shown.transports.length > 0
-                  || bridgeSection.shown.invalidLines > 0)
+                visible: bridgeSection.b.chips.length > 0 || bridgeSection.b.invalidLabel !== ""
                 width: parent.width
                 spacing: Style.space(6)
 
                 Repeater {
-                  model: bridgeSection.shown ? bridgeSection.shown.transports : []
+                  model: bridgeSection.b.chips
 
                   Chip {
                     required property var modelData
-                    glyph: Model.doctorGlyph(modelData.available ? "pass" : "fail")
-                    label: qsTr("%1 %2").arg(modelData.count).arg(modelData.name)
+                    glyph: modelData.available ? "󰄬" : "󰅙"
+                    label: modelData.label
                     tint: modelData.available ? root.foreground : root.urgent
-                    tip: modelData.available ? ""
-                      : Model.wrapTip(qsTr("%1 is not installed. Install it with: %2").arg(modelData.name).arg(modelData.installHint))
+                    tip: modelData.tip
                   }
                 }
 
                 Chip {
-                  visible: !!bridgeSection.preview && bridgeSection.preview.invalidLines > 0
-                  glyph: Model.doctorGlyph("fail")
-                  label: bridgeSection.preview && bridgeSection.preview.invalidLines === 1
-                    ? qsTr("1 invalid line")
-                    : qsTr("%1 invalid lines").arg(bridgeSection.preview ? bridgeSection.preview.invalidLines : 0)
+                  visible: bridgeSection.b.invalidLabel !== ""
+                  glyph: "󰅙"
+                  label: bridgeSection.b.invalidLabel
                   tint: root.urgent
-                  tip: Model.wrapTip(qsTr("Copy only the lines that start with a transport, like obfs4, then paste again."))
+                  tip: root.invalidTip
                 }
               }
 
               Brief {
-                full: tor.bridgeMessage
+                full: bridgeSection.b.message.full
+                short: bridgeSection.b.message.short
               }
 
               Row {
                 spacing: Style.space(8)
 
                 Button {
-                  visible: !!bridgeSection.preview
-                  text: qsTr("Use these")
+                  visible: bridgeSection.b.hasPreview
+                  text: "Use these"
                   bordered: true
                   focusable: false
-                  enabled: bridgeSection.canApply
+                  enabled: bridgeSection.b.canApply
                   opacity: enabled ? 1 : 0.4
                   foreground: root.foreground
                   fontFamily: root.fontFamily
@@ -1216,8 +1032,8 @@ Panel {
                 }
 
                 Button {
-                  visible: !!bridgeSection.preview
-                  text: qsTr("Cancel")
+                  visible: bridgeSection.b.hasPreview
+                  text: "Cancel"
                   focusable: false
                   foreground: root.foreground
                   fontFamily: root.fontFamily
@@ -1225,11 +1041,11 @@ Panel {
                 }
 
                 Button {
-                  visible: !bridgeSection.preview
-                  text: tor.bridgeWorking ? qsTr("Reading…") : qsTr("Paste bridges")
+                  visible: !bridgeSection.b.hasPreview
+                  text: bridgeSection.b.working ? "Reading…" : "Paste bridges"
                   bordered: true
                   focusable: false
-                  enabled: !tor.bridgeWorking && !tor.busy
+                  enabled: !bridgeSection.b.working && !root.v.busy
                   opacity: enabled ? 1 : 0.4
                   foreground: root.foreground
                   fontFamily: root.fontFamily
@@ -1237,39 +1053,31 @@ Panel {
                 }
 
                 Button {
-                  visible: !bridgeSection.preview && tor.bridgeState !== "off"
-                  text: tor.bridgeState === "active" ? qsTr("Turn off") : qsTr("Turn on")
+                  visible: !bridgeSection.b.hasPreview && bridgeSection.b.toggleLabel !== ""
+                  text: bridgeSection.b.toggleLabel
                   focusable: false
-                  enabled: !tor.busy && !tor.bridgeWorking
+                  enabled: !root.v.busy && !bridgeSection.b.working
                   opacity: enabled ? 1 : 0.4
                   foreground: root.foreground
                   fontFamily: root.fontFamily
-                  onClicked: tor.setBridgesEnabled(tor.bridgeState !== "active")
+                  onClicked: tor.setBridges(bridgeSection.b.state !== "active")
                 }
 
                 InfoDot {
                   anchors.verticalCenter: parent.verticalCenter
-                  tip: Model.wrapTip(qsTr("Get bridges at bridges.torproject.org or from @GetBridgesBot on Telegram. Copy the lines, then paste them here."))
+                  tip: root.bridgesHelpTip
                 }
               }
             }
           }
 
-          // Pre-setup. The helpers are the whole feature, so this state gets a
-          // hero rather than a warning: mark and wordmark, the reason we are
-          // asking, then the single action. Surfaces follow Style.cornerRadius
-          // like every shared control, so the cards match the rest of the bar
-          // instead of importing their own shape language.
+          // Pre-setup: the wordmark, then the single action.
           Column {
             id: setupHero
             visible: !tor.installed
             width: parent.width
             spacing: Style.space(14)
 
-            // Wordmark only -- the mark lives in the bar, and repeating it
-            // here just competed with the name for the same glance. With the
-            // onion gone the word takes the full panel width, so it derives a
-            // larger block size and reads as the heading it is.
             TorWordmark {
               anchors.horizontalCenter: parent.horizontalCenter
               color: root.foreground
@@ -1278,8 +1086,8 @@ Panel {
 
             Button {
               width: parent.width
-              text: qsTr("Run setup")
-              tooltipText: Model.wrapTip(qsTr("Once, in a terminal with sudo: installs tor and the helper. After that the switch never asks for a password."))
+              text: "Run setup"
+              tooltipText: root.setupTip
               bordered: true
               focusable: false
               hasCursor: root.cursorActive && root.focusSection === "setup"
@@ -1298,22 +1106,18 @@ Panel {
             foreground: root.foreground
           }
 
-          // Band 3 -- mode, named by how much each one protects and ordered
-          // most-protective first. The wire values stay lan/strict/socks.
+          // Band 3: mode, most protective first.
           Column {
             visible: tor.installed
             width: parent.width
             spacing: root.gapTight
 
             PanelSectionHeader {
-              text: qsTr("MODE")
+              text: "MODE"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
 
-            // One connected control: a single outer rectangle with two
-            // internal separators. Three bordered boxes with gaps between them
-            // read as three unrelated buttons rather than one choice of three.
             Rectangle {
               id: modeControl
               width: parent.width
@@ -1324,7 +1128,7 @@ Panel {
               border.color: root.surfaceLine
               clip: true
 
-              readonly property real segmentWidth: (width - border.width * 2) / 3
+              readonly property real segmentWidth: (width - border.width * 2) / Math.max(1, root.v.modes.length)
 
               Row {
                 x: modeControl.border.width
@@ -1332,7 +1136,7 @@ Panel {
                 height: modeControl.height - modeControl.border.width * 2
 
                 Repeater {
-                  model: Model.MODE_ORDER
+                  model: root.v.modes
 
                   Item {
                     required property var modelData
@@ -1342,7 +1146,7 @@ Panel {
                     height: parent.height
                     clip: true
 
-                    readonly property bool selected: tor.effectiveMode === String(modelData)
+                    readonly property bool selected: modelData.selected
                     readonly property bool hot: segmentHover.containsMouse
                       || (root.cursorActive && root.focusSection === "mode" && root.modeIndex === index)
 
@@ -1357,8 +1161,6 @@ Panel {
                       }
                     }
 
-                    // Divider between segments, drawn on the leading edge of
-                    // every segment but the first.
                     Rectangle {
                       visible: index > 0
                       anchors.left: parent.left
@@ -1374,7 +1176,7 @@ Panel {
                       width: parent.width - Style.space(8)
                       horizontalAlignment: Text.AlignHCenter
                       elide: Text.ElideRight
-                      text: Model.modeLabel(modelData)
+                      text: modelData.label
                       color: root.foreground
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
@@ -1386,7 +1188,7 @@ Panel {
                       anchors.fill: parent
                       hoverEnabled: true
                       cursorShape: Qt.PointingHandCursor
-                      onClicked: tor.setMode(modelData)
+                      onClicked: tor.setMode(modelData.value)
                       onContainsMouseChanged: if (containsMouse) {
                         root.cursorActive = true
                         root.focusSection = "mode"
@@ -1396,27 +1198,17 @@ Panel {
 
                     PanelToolTip {
                       visible: segmentHover.containsMouse
-                      text: Model.wrapTip(Model.modeTooltip(modelData))
+                      text: modelData.tip
                     }
                   }
                 }
               }
             }
-
           }
 
-          // No prose in the panel. What each mode does lives on the segments as
-          // hover tooltips, and the UDP/IPv6 caveats live in the README.
-          //
-          // There is deliberately no "Remove all rules" button. Switching the
-          // toggle off already runs tormarchy-disconnect, which removes the
-          // ruleset -- so the button was a second control for what the switch
-          // does, sitting right beside it and inviting the question of how the
-          // two differ. tormarchy-panic still exists as a command, which is
-          // where it belongs: its entire purpose is being reachable when the
-          // network is down and this panel is not an option.
           Brief {
-            full: tor.lastError
+            full: root.v.error.full
+            short: root.v.error.short
           }
         }
       }

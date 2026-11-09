@@ -67,29 +67,29 @@ def render(name, *extra, env=None):
         cmd += ["--font", font]
     # A latency on the fast side of normal, as a healthy connection reads.
     result = subprocess.run(cmd + list(extra), capture_output=True, text=True,
-                            env={**os.environ, "TORMARCHY_STUB_PING": "380", **(env or {})})
+                            env={**os.environ, **(env or {})})
     if "result: ok" not in result.stdout:
         sys.exit(f"{name} did not render cleanly:\n{result.stdout}{result.stderr}")
     return card, bar
 
 
-on = os.path.join(FIXTURES, "on.json")
+def view(name):
+    return os.path.join(FIXTURES, f"view-{name}.json")
+
+
+# The daemon's own views for each state: tests/qml/fixtures holds what it sends.
 shots = {
-    "panel": render("panel", "--status", on),
-    "leak-check": render("leak-check", "--status", on, "--doctor", os.path.join(FIXTURES, "doctor-pass.json"),
-                         "--expand", "leaks", "--call", "tor.checkLeaks"),
-    "bridges": render("bridges", "--status", on, "--clipboard", os.path.join(FIXTURES, "bridges.txt"),
-                      "--bridge-check", os.path.join(FIXTURES, "bridge-check-ok.json"),
-                      "--expand", "bridges", "--call", "tor.pasteBridges"),
+    "panel": render("panel", "--view", view("on")),
+    "leak-check": render("leak-check", "--view", view("leak-pass"), "--expand", "leaks"),
+    "bridges": render("bridges", "--view", view("bridges-ok"), "--expand", "bridges"),
 }
-# In the order the README's table lists them. Connecting is a switch flipped
-# on and still settling, so it is that: the off state, with the switch flipped.
+# In the order the README's table lists them.
 states = [
-    render("bar-on", "--status", on)[1],
-    render("bar-connecting", "--status", os.path.join(FIXTURES, "off.json"), "--call", "tor.toggleConnected")[1],
-    render("bar-socks", "--status", os.path.join(FIXTURES, "socks.json"))[1],
-    render("bar-off", "--status", os.path.join(FIXTURES, "off.json"))[1],
-    render("bar-blocked", "--status", os.path.join(FIXTURES, "blocked.json"))[1],
+    render("bar-on", "--view", view("on"))[1],
+    render("bar-connecting", "--view", view("boot"))[1],
+    render("bar-socks", "--view", view("socks"))[1],
+    render("bar-off", "--view", view("off"))[1],
+    render("bar-blocked", "--view", view("blocked"))[1],
 ]
 
 app = QGuiApplication(sys.argv[:1])

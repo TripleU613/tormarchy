@@ -1,0 +1,139 @@
+{
+  "view": {
+    "actionStatus": "",
+    "active": true,
+    "bar": "routed",
+    "bridges": {
+      "canApply": true,
+      "chips": [
+        {
+          "available": true,
+          "label": "2 obfs4",
+          "tip": ""
+        }
+      ],
+      "hasPreview": true,
+      "invalidLabel": "",
+      "message": {
+        "full": "",
+        "short": ""
+      },
+      "previewText": "Pasted · 2 bridges",
+      "state": "off",
+      "subtitle": "Off",
+      "toggleLabel": "",
+      "working": false
+    },
+    "busy": false,
+    "canNewCircuit": true,
+    "canToggle": true,
+    "error": {
+      "full": "",
+      "short": ""
+    },
+    "exitCaption": "EXIT · DE",
+    "exitOptions": [
+      {
+        "description": "Let Tor choose the exit",
+        "label": "Automatic",
+        "value": "auto"
+      },
+      {
+        "description": "Recent",
+        "label": "Sweden",
+        "value": "se"
+      },
+      {
+        "label": "France",
+        "value": "fr"
+      },
+      {
+        "label": "Germany",
+        "value": "de"
+      },
+      {
+        "label": "Netherlands",
+        "value": "nl"
+      },
+      {
+        "label": "Switzerland",
+        "value": "ch"
+      },
+      {
+        "label": "United States",
+        "value": "us"
+      }
+    ],
+    "exitValue": "auto",
+    "helperStale": false,
+    "installed": true,
+    "latency": {
+      "caption": "Normal for Tor",
+      "captionError": false,
+      "fraction": 0.204,
+      "measuring": false,
+      "text": "612 ms"
+    },
+    "leak": {
+      "checking": false,
+      "checks": [],
+      "failed": false,
+      "glyph": "󰕥",
+      "hasResult": false,
+      "subtitle": "Not run yet",
+      "subtitleError": false
+    },
+    "mode": "lan",
+    "modes": [
+      {
+        "label": "Maximum",
+        "selected": false,
+        "tip": "All traffic through Tor. Local network dropped\ntoo.",
+        "value": "strict"
+      },
+      {
+        "label": "Standard",
+        "selected": true,
+        "tip": "All internet traffic through Tor. Local\nnetwork still reachable.",
+        "value": "lan"
+      },
+      {
+        "label": "Browser only",
+        "selected": false,
+        "tip": "Nothing is routed system-wide. Any app that\nspeaks SOCKS can opt in on 127.0.0.1:9050 — a\nbrowser is just the usual one.",
+        "value": "socks"
+      }
+    ],
+    "protocol": 1,
+    "stats": {
+      "age": "2m 15s",
+      "hops": [
+        {
+          "exit": false,
+          "label": "SE",
+          "tip": "Guard · Sweden · frostbite · 21 MB/s · Fast, Stable"
+        },
+        {
+          "exit": false,
+          "label": "CH",
+          "tip": "Middle · Switzerland · alpenglow · 8.3 MB/s · Fast"
+        },
+        {
+          "exit": true,
+          "label": "DE",
+          "tip": "Exit · Germany · rheinexit · 640 KB/s · Fast"
+        }
+      ],
+      "traffic": "↓ 4.2 MB ↑ 305 KB",
+      "visible": true
+    },
+    "statusText": "All traffic through Tor via DE",
+    "switchCaption": "ON",
+    "switchCaptionLit": false,
+    "version": "2.0.0",
+    "warning": {
+      "full": "",
+      "short": ""
+    }
+  }
+}

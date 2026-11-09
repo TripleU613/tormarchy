@@ -7,6 +7,10 @@ on:
 
 permissions:
   contents: write
+  # Keyless signing: the release is signed with a short-lived certificate
+  # Sigstore issues to this workflow's own GitHub identity, which is what the
+  # plugin's setup verifies before anything runs as root.
+  id-token: write
 
 jobs:
   release:
@@ -35,16 +39,58 @@ jobs:
         if: steps.check.outputs.release == 'true'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck libxml2-utils nftables
+          sudo apt-get install -y -qq shellcheck libxml2-utils nftables python3 tor
           # nft resolves `meta skuid "tor"` when it parses the ruleset, so the
           # account has to exist for the ruleset to be checkable at all.
           sudo useradd --system --no-create-home --shell /usr/sbin/nologin tor || true
+
+      - name: Install Rust
+        if: steps.check.outputs.release == 'true'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: x86_64-unknown-linux-musl
+          components: clippy, rustfmt
 
       # Nothing is published that has not passed. Same script CI and
       # contributors run, so there is one definition of green.
       - name: Run checks
         if: steps.check.outputs.release == 'true'
-        run: sudo -E .github/scripts/check.sh
+        run: sudo -E env "PATH=$PATH" .github/scripts/check.sh
+
+      - name: Build the release
+        if: steps.check.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          cargo build --release --locked --target x86_64-unknown-linux-musl
+          out=target/x86_64-unknown-linux-musl/release
+          [[ $("$out/tormarchy" version) == "tormarchy $VERSION" ]] || { echo "binary version does not match the manifest"; exit 1; }
+          mkdir -p dist
+          # The same bytes for the same binaries: sorted, owned by nobody, dated
+          # by the commit.
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+            --mtime="@$(git log -1 --format=%ct)" -C "$out" \
+            -czf "dist/tormarchy-$VERSION-x86_64-linux.tar.gz" tormarchy tormarchyd
+          sha256sum dist/*.tar.gz
+
+      - name: Install cosign
+        if: steps.check.outputs.release == 'true'
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
+      - name: Sign the release
+        if: steps.check.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          asset="dist/tormarchy-$VERSION-x86_64-linux.tar.gz"
+          cosign sign-blob --yes --bundle "$asset.sigstore.json" "$asset"
+          # Proved here exactly as setup will check it, before it is published.
+          cosign verify-blob --bundle "$asset.sigstore.json" \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/auto-release.yml@refs/heads/master" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-github-workflow-repository "${{ github.repository }}" \
+            --certificate-github-workflow-sha "${{ github.sha }}" \
+            "$asset"
 
       - name: Tag and publish
         if: steps.check.outputs.release == 'true'
@@ -57,8 +103,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git tag -a "v$VERSION" -m "v$VERSION"
+          # At the commit the release was built and signed from, which is the
+          # commit setup checks the signature against.
+          git tag -a "v$VERSION" -m "v$VERSION" "${{ github.sha }}"
           git push origin "v$VERSION"
           # Notes come from merged pull requests, so contributors get credited
           # without anyone maintaining a changelog.
-          gh release create "v$VERSION" --title "v$VERSION" --generate-notes --verify-tag
+          gh release create "v$VERSION" --title "v$VERSION" --generate-notes --verify-tag \
+            dist/tormarchy-*-x86_64-linux.tar.gz dist/tormarchy-*-x86_64-linux.tar.gz.sigstore.json

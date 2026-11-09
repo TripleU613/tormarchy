@@ -1,7 +1,7 @@
 QMLLINT := /usr/lib/qt6/bin/qmllint
 QML_FILES := Panel.qml Service.qml TorIcon.qml TorWordmark.qml SpeedGauge.qml
 
-.PHONY: check check-root test shell screenshots qml-check hooks install reinstall doctor validate help
+.PHONY: check check-root test build release shell screenshots qml-check hooks install install-dev reinstall doctor validate help
 
 # Everything CI runs. Same script, so green here is green there.
 check:
@@ -13,11 +13,18 @@ check-root:
 	sudo .github/scripts/check.sh
 
 test:
-	python3 tests/test_qml_names.py
+	cargo test --workspace --locked
+	cargo build --locked
+	python3 tests/daemon/scenarios.py target/debug/tormarchyd
 	bash tests/test_decisions.sh
-	bash tests/test_helpers.sh
-	node tests/test_model.js
+	python3 tests/test_qml_names.py
 
+build:
+	cargo build --locked
+
+# What the release ships: static, so it runs on any x86_64 Omarchy.
+release:
+	cargo build --release --locked --target x86_64-unknown-linux-musl
 
 # The widget under a real Qt engine, in every state, against Omarchy's shell.
 # Needs PySide6; OMARCHY_PATH=~/src/omarchy to test against a checkout.
@@ -42,16 +49,21 @@ hooks:
 	git config core.hooksPath .githooks
 	@echo "  pre-commit will now bump the patch version when source changes"
 
+# The published release, verified, the way every user installs it.
 install:
-	sudo ./tormarchy setup
+	sudo ./setup
+
+# What you just built, unverified: for working on it.
+install-dev: release
+	sudo ./setup --local target/x86_64-unknown-linux-musl/release
 
 reinstall:
-	sudo ./tormarchy uninstall
-	sudo ./tormarchy setup
+	sudo tormarchy uninstall
+	sudo ./setup
 	omarchy-restart-shell
 
 doctor:
-	./tormarchy doctor
+	tormarchy doctor
 
 validate: check test
 	omarchy plugin validate .
@@ -61,11 +73,14 @@ help:
 	@echo "hooks        enable auto-versioning on commit"
 	@echo "check        every CI check"
 	@echo "check-root   the same, plus nft validation against the kernel"
-	@echo "test         name collisions, pinned decisions, helpers, Model.js"
+	@echo "test         Rust tests, daemon scenarios, pinned decisions, names"
+	@echo "build        debug build of the helper and the daemon"
+	@echo "release      static release build"
 	@echo "shell        load the widget in Qt in every state, and run its scenarios"
 	@echo "screenshots  re-render the README pictures and preview.png"
 	@echo "qml-check    qmllint, import noise filtered out"
-	@echo "install      sudo ./tormarchy setup"
+	@echo "install      sudo ./setup: the verified release"
+	@echo "install-dev  build, then install that build, unverified"
 	@echo "reinstall    uninstall, setup, restart the shell"
 	@echo "doctor       leak checks"
 	@echo "validate     check + test + omarchy plugin validate"

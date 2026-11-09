@@ -421,6 +421,8 @@ pub mod testing {
     use crate::paths::Paths;
     use crate::sys::{self, Output};
 
+    type Hook = Box<dyn Fn(&Fake)>;
+
     pub struct Fake {
         pub paths: Paths,
         pub root: PathBuf,
@@ -433,7 +435,7 @@ pub mod testing {
         pub log: RefCell<Vec<String>>,
         pub nft_inputs: RefCell<Vec<String>>,
         /// Called inside apply: lets a test land a panic mid-apply.
-        pub on_apply: RefCell<Option<Box<dyn Fn(&Fake)>>>,
+        pub on_apply: RefCell<Option<Hook>>,
         pub clock: Cell<Duration>,
         pub start: Instant,
         pub transports: RefCell<Vec<String>>,
@@ -471,6 +473,12 @@ pub mod testing {
         }
         pub fn did(&self, what: &str) -> bool {
             self.log.borrow().iter().any(|l| l.contains(what))
+        }
+    }
+
+    impl Default for Fake {
+        fn default() -> Self {
+            Self::new()
         }
     }
 

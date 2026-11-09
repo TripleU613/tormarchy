@@ -1,0 +1,188 @@
+{
+  "view": {
+    "actionStatus": "",
+    "active": true,
+    "bar": "routed",
+    "bridges": {
+      "canApply": false,
+      "chips": [],
+      "hasPreview": false,
+      "invalidLabel": "",
+      "message": {
+        "full": "",
+        "short": ""
+      },
+      "previewText": "",
+      "state": "off",
+      "subtitle": "Off",
+      "toggleLabel": "",
+      "working": false
+    },
+    "busy": false,
+    "canNewCircuit": true,
+    "canToggle": true,
+    "error": {
+      "full": "",
+      "short": ""
+    },
+    "exitCaption": "EXIT · DE",
+    "exitOptions": [
+      {
+        "description": "Let Tor choose the exit",
+        "label": "Automatic",
+        "value": "auto"
+      },
+      {
+        "description": "Recent",
+        "label": "Sweden",
+        "value": "se"
+      },
+      {
+        "label": "France",
+        "value": "fr"
+      },
+      {
+        "label": "Germany",
+        "value": "de"
+      },
+      {
+        "label": "Netherlands",
+        "value": "nl"
+      },
+      {
+        "label": "Switzerland",
+        "value": "ch"
+      },
+      {
+        "label": "United States",
+        "value": "us"
+      }
+    ],
+    "exitValue": "auto",
+    "helperStale": false,
+    "installed": true,
+    "latency": {
+      "caption": "Normal for Tor",
+      "captionError": false,
+      "fraction": 0.204,
+      "measuring": false,
+      "text": "612 ms"
+    },
+    "leak": {
+      "checking": false,
+      "checks": [
+        {
+          "glyph": "󰄬",
+          "label": "Tor",
+          "status": "pass",
+          "tip": "tor.service is running"
+        },
+        {
+          "glyph": "󰄬",
+          "label": "Bootstrap",
+          "status": "pass",
+          "tip": "bootstrapped (100%)"
+        },
+        {
+          "glyph": "󰄬",
+          "label": "Control port",
+          "status": "pass",
+          "tip": "control cookie readable at\n/run/tormarchy/control.cookie"
+        },
+        {
+          "glyph": "󰄬",
+          "label": "Exit",
+          "status": "pass",
+          "tip": "check.torproject.org confirms this connection\nis Tor\nexit as seen from outside: 192.0.2.3"
+        },
+        {
+          "glyph": "󰄬",
+          "label": "IPv6",
+          "status": "pass",
+          "tip": "IPv6 is blocked"
+        },
+        {
+          "glyph": "󰀦",
+          "label": "IPv6 stack",
+          "status": "warn",
+          "tip": "IPv6 is filtered but the kernel stack is still\nup"
+        },
+        {
+          "glyph": "󰄬",
+          "label": "DNS",
+          "status": "pass",
+          "tip": "DNS resolves (through Tor's DNSPort)"
+        },
+        {
+          "glyph": "󰄬",
+          "label": "Forwarding",
+          "status": "pass",
+          "tip": "IP forwarding is off, so nothing routes\nthrough this machine"
+        },
+        {
+          "glyph": "󰄬",
+          "label": "Clock",
+          "status": "pass",
+          "tip": "clock is NTP-synchronised"
+        }
+      ],
+      "failed": false,
+      "glyph": "󰀦",
+      "hasResult": true,
+      "subtitle": "1 warning · 8 passed · 2 min ago",
+      "subtitleError": false
+    },
+    "mode": "lan",
+    "modes": [
+      {
+        "label": "Maximum",
+        "selected": false,
+        "tip": "All traffic through Tor. Local network dropped\ntoo.",
+        "value": "strict"
+      },
+      {
+        "label": "Standard",
+        "selected": true,
+        "tip": "All internet traffic through Tor. Local\nnetwork still reachable.",
+        "value": "lan"
+      },
+      {
+        "label": "Browser only",
+        "selected": false,
+        "tip": "Nothing is routed system-wide. Any app that\nspeaks SOCKS can opt in on 127.0.0.1:9050 — a\nbrowser is just the usual one.",
+        "value": "socks"
+      }
+    ],
+    "protocol": 1,
+    "stats": {
+      "age": "2m 15s",
+      "hops": [
+        {
+          "exit": false,
+          "label": "SE",
+          "tip": "Guard · Sweden · frostbite · 21 MB/s · Fast, Stable"
+        },
+        {
+          "exit": false,
+          "label": "CH",
+          "tip": "Middle · Switzerland · alpenglow · 8.3 MB/s · Fast"
+        },
+        {
+          "exit": true,
+          "label": "DE",
+          "tip": "Exit · Germany · rheinexit · 640 KB/s · Fast"
+        }
+      ],
+      "traffic": "↓ 4.2 MB ↑ 305 KB",
+      "visible": true
+    },
+    "statusText": "All traffic through Tor via DE",
+    "switchCaption": "ON",
+    "switchCaptionLit": false,
+    "version": "2.0.0",
+    "warning": {
+      "full": "",
+      "short": ""
+    }
+  }
+}

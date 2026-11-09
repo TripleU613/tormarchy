@@ -1268,3 +1268,241 @@ fn plugin_version(dir: &std::path::Path) -> Option<String> {
     let v: Value = serde_json::from_str(&text).ok()?;
     v.get("version").and_then(Value::as_str).map(str::to_string)
 }
+
+/// The panel's QML is tested against these views, in tests/qml/fixtures. They
+/// are this daemon's own output for each state the panel can be in, so the QML
+/// can never be tested against a view the daemon would not send. Regenerate with
+/// TORMARCHY_UPDATE_FIXTURES=1 cargo test.
+#[cfg(test)]
+mod golden {
+    use super::*;
+    use tormarchy_core::doctor::Check;
+    use tormarchy_core::tor::Hop;
+
+    fn daemon(root: &std::path::Path) -> Daemon {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut d = Daemon::new(tx);
+        d.paths = Paths::under(root);
+        d.host = System::new(d.paths.clone());
+        d.notified = Some(ConnState::Off);
+        d.facts.installed = true;
+        d.facts.bridges = "off".into();
+        d.exit_countries = ["de", "nl", "se", "ch", "us", "fr"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        d.settings.recent_exits = vec!["se".into()];
+        d
+    }
+
+    fn routed(d: &mut Daemon) {
+        d.facts.tor_running = true;
+        d.facts.control_port = true;
+        d.facts.connected = true;
+        d.facts.bootstrap = 100;
+        d.facts.mode = Some(Mode::Lan);
+        d.facts.hops = vec![
+            Hop {
+                cc: "se".into(),
+                nickname: "frostbite".into(),
+                flags: vec!["Guard".into(), "Fast".into(), "Stable".into()],
+                bandwidth_kbps: 21400,
+                ip: "192.0.2.1".into(),
+            },
+            Hop {
+                cc: "ch".into(),
+                nickname: "alpenglow".into(),
+                flags: vec!["Fast".into()],
+                bandwidth_kbps: 8300,
+                ip: "192.0.2.2".into(),
+            },
+            Hop {
+                cc: "de".into(),
+                nickname: "rheinexit".into(),
+                flags: vec!["Exit".into(), "Fast".into()],
+                bandwidth_kbps: 640,
+                ip: "192.0.2.3".into(),
+            },
+        ];
+        d.facts.circuit_age = 135;
+        d.facts.bytes_read = 4_400_000;
+        d.facts.bytes_written = 312_000;
+        d.latency = 612;
+    }
+
+    fn check(id: &str, status: Status, text: &str, detail: &str) -> Check {
+        Check {
+            id: id.into(),
+            group: String::new(),
+            status,
+            text: text.into(),
+            detail: detail.into(),
+        }
+    }
+
+    fn report(fail: bool) -> Report {
+        let mut checks = vec![
+            check("tor", Status::Pass, "tor.service is running", ""),
+            check("bootstrap", Status::Pass, "bootstrapped (100%)", ""),
+            check(
+                "control",
+                Status::Pass,
+                "control cookie readable at /run/tormarchy/control.cookie",
+                "",
+            ),
+            check(
+                "exit",
+                Status::Pass,
+                "check.torproject.org confirms this connection is Tor",
+                "exit as seen from outside: 192.0.2.3",
+            ),
+            check("ipv6", Status::Pass, "IPv6 is blocked", ""),
+            check(
+                "ipv6-stack",
+                Status::Warn,
+                "IPv6 is filtered but the kernel stack is still up",
+                "",
+            ),
+            check(
+                "dns",
+                Status::Pass,
+                "DNS resolves (through Tor's DNSPort)",
+                "",
+            ),
+            check(
+                "forwarding",
+                Status::Pass,
+                "IP forwarding is off, so nothing routes through this machine",
+                "",
+            ),
+            check("clock", Status::Pass, "clock is NTP-synchronised", ""),
+        ];
+        if fail {
+            checks[3] = check(
+                "exit",
+                Status::Fail,
+                "check.torproject.org says this is NOT Tor -- traffic is escaping the redirect",
+                "",
+            );
+        }
+        let failures = checks.iter().filter(|c| c.status == Status::Fail).count();
+        Report {
+            ok: failures == 0,
+            failures,
+            checked_at: String::new(),
+            mode: "lan".into(),
+            checks,
+            connected: true,
+            tor_running: true,
+        }
+    }
+
+    fn states(root: &std::path::Path) -> Vec<(&'static str, Value)> {
+        let mut out = Vec::new();
+        let mut d = daemon(root);
+        d.facts.installed = false;
+        out.push(("view-not-installed", d.view()));
+
+        let d = daemon(root);
+        out.push(("view-off", d.view()));
+
+        let mut d = daemon(root);
+        d.facts.tor_running = true;
+        d.facts.control_port = true;
+        d.facts.bootstrap = 45;
+        d.desired = Some(true);
+        d.action_running = true;
+        out.push(("view-boot", d.view()));
+
+        let mut d = daemon(root);
+        routed(&mut d);
+        out.push(("view-on", d.view()));
+
+        let mut d = daemon(root);
+        routed(&mut d);
+        d.facts.tor_running = false;
+        d.facts.control_port = false;
+        d.facts.hops.clear();
+        d.latency = 0;
+        out.push(("view-blocked", d.view()));
+
+        let mut d = daemon(root);
+        routed(&mut d);
+        d.facts.connected = false;
+        d.facts.mode = Some(Mode::Socks);
+        out.push(("view-socks", d.view()));
+
+        let mut d = daemon(root);
+        routed(&mut d);
+        d.leak = Some(report(false));
+        d.leak_at = sys::now_unix();
+        out.push(("view-leak-pass", d.view()));
+
+        let mut d = daemon(root);
+        routed(&mut d);
+        d.leak = Some(report(true));
+        d.leak_at = sys::now_unix();
+        out.push(("view-leak-fail", d.view()));
+
+        let mut d = daemon(root);
+        routed(&mut d);
+        let mut counts = std::collections::BTreeMap::new();
+        counts.insert("obfs4".to_string(), 2);
+        counts.insert("webtunnel".to_string(), 1);
+        let mut preview = bridges::report(&d.host, &counts);
+        // The machine the fixture is made on decides availability; fixed here.
+        for t in preview.transports.iter_mut() {
+            t.available = t.name == "obfs4";
+            t.install_hint = if t.available {
+                String::new()
+            } else {
+                bridges::install_hint(&t.name)
+            };
+        }
+        preview.invalid_lines = Some(1);
+        d.preview = Some(preview);
+        d.pending_bridges = "obfs4 192.0.2.1:443 A\n".into();
+        out.push(("view-bridges-preview", d.view()));
+
+        let mut d = daemon(root);
+        routed(&mut d);
+        let mut counts = std::collections::BTreeMap::new();
+        counts.insert("obfs4".to_string(), 2);
+        let mut preview = bridges::report(&d.host, &counts);
+        for t in preview.transports.iter_mut() {
+            t.available = true;
+            t.install_hint.clear();
+        }
+        preview.invalid_lines = Some(0);
+        d.preview = Some(preview);
+        d.pending_bridges = "obfs4 192.0.2.1:443 A\n".into();
+        out.push(("view-bridges-ok", d.view()));
+        out
+    }
+
+    #[test]
+    fn the_qml_fixtures_are_this_daemons_output() {
+        let root = sys::create_temp_dir("tm-golden-").unwrap();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/qml/fixtures");
+        let update = std::env::var_os("TORMARCHY_UPDATE_FIXTURES").is_some();
+        let mut stale = Vec::new();
+        for (name, view) in states(&root) {
+            let mut v = view;
+            // Time-dependent text is fixed so the files are stable.
+            if let Some(s) = v.pointer_mut("/leak/subtitle") {
+                if let Some(t) = s.as_str() {
+                    *s = Value::String(t.replace("just now", "2 min ago"));
+                }
+            }
+            let text = serde_json::to_string_pretty(&json!({"view": v})).unwrap() + "\n";
+            let path = dir.join(format!("{name}.json"));
+            if update {
+                std::fs::write(&path, &text).unwrap();
+            } else if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+                stale.push(name);
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(stale.is_empty(), "fixtures differ from what the daemon sends ({stale:?}); run TORMARCHY_UPDATE_FIXTURES=1 cargo test");
+    }
+}
