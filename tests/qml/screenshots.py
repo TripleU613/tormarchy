@@ -8,7 +8,7 @@ Screenshots taken by hand go stale with every change and are taken on whatever
 theme and font the person happened to run. These come from the fixtures, at
 twice the size so edges stay sharp, in Omarchy's default theme and font:
 
-    assets/screenshots/setup.png        before setup: the one button
+    assets/screenshots/first-run.png    before setup: the one button
     assets/screenshots/panel.png        connected, with an exit country pinned
     assets/screenshots/leak-check.png   the leak check, run
     assets/screenshots/bridges.png      a bridge paste, previewed
@@ -103,7 +103,9 @@ def pinned(name):
 
 # The daemon's own views for each state: tests/qml/fixtures holds what it sends.
 shots = {
-    "setup": render("setup", "--view", view("not-installed")),
+    # Not "setup": the marketplace's scan refuses any binary whose name says
+    # install, setup or uninstall.
+    "first-run": render("first-run", "--view", view("not-installed")),
     "panel": render("panel", "--view", pinned("on")),
     "leak-check": render("leak-check", "--view", pinned("leak-pass"), "--expand", "leaks"),
     "bridges": render("bridges", "--view", view("bridges-ok"), "--expand", "bridges"),

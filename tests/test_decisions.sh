@@ -26,6 +26,16 @@ HELPER=crates/tormarchy/src/main.rs
 INSTALL=crates/tormarchy/src/install.rs
 BROWSER=crates/tormarchy/src/browser.rs
 
+echo "Marketplace"
+
+# The marketplace's security scan fails closed on any binary file whose name
+# contains install, installer, setup or uninstall: it cannot read inside it, so
+# it will not vouch for it, and the listing cannot be verified at all.
+named=$(git ls-files | grep -iE '(install|setup)[^/]*$' | while read -r f; do
+  [[ -f $f ]] && ! grep -qI . "$f" && echo "$f"
+done)
+if [[ -z $named ]]; then ok "no binary file is named like an installer"; else bad "binary named like an installer, which the marketplace scan refuses: $named"; fi
+
 echo "Privilege boundary"
 
 # The passwordless grant reaches only the subcommands that need root. One action
