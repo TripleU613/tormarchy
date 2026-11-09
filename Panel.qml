@@ -1350,7 +1350,11 @@ Panel {
                       anchors.fill: parent
                       color: parent.selected ? Util.alpha(root.foreground, 0.14)
                         : (parent.hot ? Util.alpha(root.foreground, 0.06) : "transparent")
-                      Behavior on color { ColorAnimation { duration: 140 } }
+                      Behavior on color {
+                        ColorAnimation {
+                          duration: typeof Style.duration === "function" ? Style.duration(140) : 140
+                        }
+                      }
                     }
 
                     // Divider between segments, drawn on the leading edge of

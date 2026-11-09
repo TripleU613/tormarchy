@@ -19,6 +19,11 @@ Item {
   property real size: Style.space(78)
   property bool busy: false
 
+  // Same contract as TorIcon: with animations off the needle jumps straight to
+  // its value and the busy arc holds still rather than spinning on.
+  readonly property bool reduceMotion: Style.reduceMotion === true
+  function duration(ms) { return typeof Style.duration === "function" ? Style.duration(ms) : ms }
+
   // The dial leaves 90° open at the bottom: 135° start, 270° of travel.
   readonly property real startAngle: 135
   readonly property real sweep: 270
@@ -67,7 +72,8 @@ Item {
         // A zero sweep still paints a round cap, which would show a stray dot
         // at the start of an empty gauge. Collapse the stroke instead.
         sweepAngle: root.sweep * root.clamped
-        Behavior on sweepAngle { NumberAnimation { duration: 320; easing.type: Easing.OutCubic } }
+        // Under the shell's 300 ms ceiling for a transition.
+        Behavior on sweepAngle { NumberAnimation { duration: root.duration(240); easing.type: Easing.OutCubic } }
       }
     }
   }
@@ -102,9 +108,9 @@ Item {
     property: "startAngle"
     from: 0
     to: 360
-    duration: 1100
+    duration: root.duration(1100)
     loops: Animation.Infinite
-    running: root.busy
+    running: root.busy && !root.reduceMotion
   }
 
   // Whatever the caller wants in the middle: a number, a dash, a label.

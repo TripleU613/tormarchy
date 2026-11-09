@@ -1,0 +1,9 @@
+# Keeps the full-SHA action pins in the workflows current. Each bump arrives as
+# a pull request, which the auto-merge workflow holds for a human: workflows
+# execute, so they are never on its prose-only list.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

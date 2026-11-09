@@ -344,19 +344,35 @@ Item {
       return
     }
     notifyProcess.command = Model.notificationArgv(n, _toastId)
+    _notifyStarted = false
     notifyProcess.running = true
   }
+
+  // Whether the sender this toast went to actually started. Quickshell reports
+  // a program it cannot find as neither an exit nor a start -- only `running`
+  // falling back to false -- so a missing sender is told apart from one that
+  // ran by never having started.
+  property bool _notifyStarted: false
 
   Process {
     id: notifyProcess
     running: false
     command: []
     stdout: StdioCollector { id: notifyStdout; waitForEnd: true }
+    onStarted: root._notifyStarted = true
+    // An Omarchy without the sender: say nothing rather than fall back to
+    // notify-send, which Omarchy itself never uses -- and stop asking, rather
+    // than log a failed start into the shell's journal on every change.
+    onRunningChanged: {
+      if (running || root._notifyStarted) return
+      root.notificationsAvailable = false
+      root._queuedNotification = null
+    }
     onExited: function(exitCode) {
-      // An Omarchy without the sender: say nothing rather than fall back to
-      // notify-send, which Omarchy itself never uses.
+      // The sender ran but could not find something it needs.
       if (exitCode === 127) {
         root.notificationsAvailable = false
+        root._queuedNotification = null
         return
       }
       var id = String(notifyStdout.text || "").trim()

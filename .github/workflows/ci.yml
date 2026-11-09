@@ -21,7 +21,7 @@ jobs:
     name: Checks
     runs-on: ${{ !contains(fromJSON('["pull_request","pull_request_review","pull_request_target","issue_comment","workflow_run"]'), github.event_name) && 'debiantripleu-ci' || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install tooling
         run: |
@@ -52,7 +52,7 @@ jobs:
     name: Loads in the shell
     runs-on: ${{ !contains(fromJSON('["pull_request","pull_request_review","pull_request_target","issue_comment","workflow_run"]'), github.event_name) && 'debiantripleu-ci' || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # PySide6's wheels bring Qt itself, but not the system GL, keyboard and
       # font libraries it links against. Not pinned below the current release:
@@ -77,7 +77,10 @@ jobs:
       - name: Fetch Omarchy, released and in development
         run: |
           repo=https://github.com/basecamp/omarchy.git
-          release=$(git ls-remote --tags --refs --sort=-v:refname "$repo" 'v*' | head -1 | sed 's|.*refs/tags/||')
+          # Final releases only. Version sort ranks v4.5.0-rc3 above v4.5.0, so
+          # without the filter "the latest release" was a release candidate.
+          release=$(git ls-remote --tags --refs --sort=-v:refname "$repo" 'v*' | sed 's|.*refs/tags/||' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
           echo "latest release: $release"
           git clone -q --depth 1 --branch "$release" "$repo" "$RUNNER_TEMP/omarchy-release"
           git clone -q --depth 1 "$repo" "$RUNNER_TEMP/omarchy-dev"
