@@ -18,8 +18,16 @@ Needs Omarchy 4.x on x86_64. Everything else it uses is already on an Arch box â
 
 ```bash
 omarchy plugin add https://github.com/TripleU613/tormarchy.git --enable
-sudo ~/.config/omarchy/plugins/tripleu.tor/setup
 ```
+
+Then click the onion in the bar and press **Set up**. Omarchy asks for your
+password once, Tor and the helper are installed, and a notification says when
+it's ready. After that the switch never asks again.
+
+Prefer a terminal? `sudo ~/.config/omarchy/plugins/tripleu.tor/setup` does the
+same thing.
+
+### What setup does
 
 `setup` fetches the release for the version of the plugin you have, and checks
 its signature before anything runs as root: it has to have been signed by this
@@ -28,8 +36,8 @@ version's tag names on GitHub. That's [Sigstore](https://www.sigstore.dev/)
 keyless signing, so there is no key in this repository to trust or to steal.
 If it doesn't verify, nothing is installed.
 
-Then the release's own `setup` takes over. It needs a terminal and tells you
-everything it touches as it goes. For the record, that's: `tor` installed,
+Then the release's own `setup` takes over and says everything it touches as it
+goes. For the record, that's: `tor` installed,
 `tormarchy` and `tormarchyd` copied to `/usr/local/bin`, a config snippet in
 `/etc/tor/torrc.d/`, one line added to `/etc/tor/torrc`, a polkit rule so the
 toggle doesn't ask for a password, your user added to the `tor` group,
@@ -43,8 +51,11 @@ disconnect, mode, exit, bridge, panic and the browser lock â€” each pinned by na
 Anything else asks for your password, and nothing it covers runs a program you
 name.
 
-Run `setup` again after updating the plugin: the helper is only replaced by
-`setup`. The panel shows **Update helper** when it's due.
+The password goes through polkit's own always-ask rule, the same check `sudo`
+makes: the passwordless rule above never covers setup.
+
+After updating the plugin, the panel shows **Update helper**: the helper is only
+replaced by `setup`, and that button runs it again the same way.
 
 ## How it's built
 

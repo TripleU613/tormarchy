@@ -119,6 +119,96 @@ Item {
     }
   }
 
+  // Setup, started from the panel. pkexec raises Omarchy's own password dialog;
+  // setup's lines become the progress the panel shows while it runs, and the
+  // result arrives as a notification, since the panel closes for the dialog.
+  property bool settingUp: false
+  property string setupStatus: ""
+  property string setupError: ""
+  // No polkit agent to ask the password with: the panel falls back to a
+  // terminal and sudo.
+  signal setupNeedsTerminal()
+
+  function runSetup() {
+    if (setupRun.running) return
+    setupError = ""
+    setupStatus = "Waiting for your password..."
+    settingUp = true
+    setupRun.lastError = ""
+    setupRun.noAgent = false
+    setupRun.exitSeen = false
+    setupRun.running = true
+  }
+
+  function notify(args) {
+    if (settings && settings.notifications === "off") return
+    notifier.command = ["omarchy-notification-send", "--app-name", "Tormarchy"].concat(args)
+    notifier.running = true
+  }
+
+  Process {
+    id: setupRun
+    command: ["pkexec", root.pluginDir + "/setup"]
+    running: false
+    property string lastError: ""
+    property bool noAgent: false
+    property bool exitSeen: false
+
+    stdout: SplitParser {
+      onRead: function(line) {
+        var t = line.trim()
+        if (t !== "") root.setupStatus = t
+      }
+    }
+    stderr: SplitParser {
+      onRead: function(line) {
+        var t = line.trim()
+        if (t === "") return
+        if (/authentication agent/i.test(t)) setupRun.noAgent = true
+        setupRun.lastError = t.replace(/^(setup|tormarchy): /, "")
+      }
+    }
+
+    onExited: function(code) {
+      exitSeen = true
+      root.settingUp = false
+      root.setupStatus = ""
+      if (code === 0) {
+        root.notify(["-g", "󰒃", "Tor is set up", "Click the onion in the bar to connect.",
+                     "--exec", "omarchy-shell", "tripleu.tor", "open"])
+        // The helper was just installed or replaced: start the daemon again so
+        // it is the new one, and soon, so the panel is not left saying "set up".
+        restart.stop()
+        root.backoffMs = 250
+        if (daemon.running) daemon.running = false
+        else daemon.running = true
+      } else if (setupRun.noAgent) {
+        root.setupNeedsTerminal()
+      } else if (code === 126 || code === 127) {
+        // The password dialog was dismissed, or the password refused.
+      } else {
+        root.setupError = setupRun.lastError || ("Setup failed (exit " + code + ")")
+        root.notify(["-u", "critical", "Tor setup failed", root.setupError,
+                     "--exec", "omarchy-shell", "tripleu.tor", "open"])
+      }
+    }
+
+    // pkexec missing altogether: Quickshell drops running without an exit.
+    // Checked once the exit, if there is one, has had its turn: which of the
+    // two signals comes first is not promised.
+    onRunningChanged: {
+      if (running) return
+      Qt.callLater(function() {
+        if (setupRun.exitSeen || !root.settingUp) return
+        root.settingUp = false
+        root.setupStatus = ""
+        root.setupNeedsTerminal()
+      })
+    }
+  }
+
+  Process { id: notifier; running: false }
+
   Timer {
     id: restart
     interval: root.backoffMs
