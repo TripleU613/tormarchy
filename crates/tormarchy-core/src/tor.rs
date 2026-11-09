@@ -407,12 +407,60 @@ pub fn exit_countries(endpoint: &Endpoint) -> Result<Vec<String>, String> {
     Ok(countries.into_iter().collect())
 }
 
+/// Circuits that carry exit traffic. Since conflux (tor 0.4.8) most streams
+/// ride CONFLUX_LINKED legs, not GENERAL ones, so both count. Tor's own one-hop
+/// and internal circuits carry no user streams and are left alone.
+fn exit_circuits(circuit_status: &str) -> Vec<&str> {
+    circuit_status
+        .lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let carries = f.len() >= 3
+                && f[1] == "BUILT"
+                && f.iter().any(|x| {
+                    matches!(
+                        *x,
+                        "PURPOSE=GENERAL" | "PURPOSE=CONFLUX_LINKED" | "PURPOSE=CONFLUX_UNLINKED"
+                    )
+                })
+                && !f
+                    .iter()
+                    .any(|x| x.contains("ONEHOP_TUNNEL") || x.contains("IS_INTERNAL"));
+            carries.then(|| f[0])
+        })
+        .collect()
+}
+
+/// NEWNYM only steers new streams. A browser keeps its HTTP/2 connections open
+/// and reuses them, so a site already loaded goes on seeing the old exit -- the
+/// old country, even after an exit pin -- until the connection idles out.
+/// Closing the circuits drops those streams and the browser reconnects through
+/// a fresh one. Best effort: a circuit can vanish between list and close.
+fn close_exit_circuits(ask: &mut dyn Ask) {
+    let Ok(status) = getinfo(ask, &["circuit-status"]) else {
+        return;
+    };
+    let Some(status) = status.get("circuit-status") else {
+        return;
+    };
+    let close: Vec<String> = exit_circuits(status)
+        .into_iter()
+        .map(|id| format!("CLOSECIRCUIT {id}"))
+        .collect();
+    if !close.is_empty() {
+        let _ = ask.ask(&close, control::REPLY_LIMIT);
+    }
+}
+
 pub fn newnym(ask: &mut dyn Ask) -> Result<(), String> {
     let replies = ask
         .ask(&["SIGNAL NEWNYM".to_string()], control::REPLY_LIMIT)
         .map_err(|e| e.to_string())?;
     match replies.first() {
-        Some(r) if r.is_ok() => Ok(()),
+        Some(r) if r.is_ok() => {
+            close_exit_circuits(ask);
+            Ok(())
+        }
         Some(r) => Err(format!(
             "tor refused the NEWNYM request: {} {}",
             r.code,
@@ -444,6 +492,18 @@ mod tests {
 8 EXTENDED $HHH~h PURPOSE=GENERAL TIME_CREATED=2026-11-09T13:00:00.000000
 9 BUILT $III~i,$JJJ~j,$KKK~k PURPOSE=HS_CLIENT_REND TIME_CREATED=2026-11-09T14:00:00.000000
 ";
+
+    #[test]
+    fn newnym_closes_every_circuit_a_stream_can_ride() {
+        let status = format!(
+            "{CIRCUITS}30 BUILT $LLL~l,$MMM~m,$NNN~n BUILD_FLAGS=NEED_CAPACITY,NEED_UPTIME PURPOSE=CONFLUX_LINKED TIME_CREATED=2026-11-09T09:00:00.000000\n"
+        );
+        assert_eq!(
+            exit_circuits(&status),
+            ["5", "7", "30"],
+            "general and conflux legs close; one-hop, unbuilt and onion circuits stay"
+        );
+    }
 
     #[test]
     fn the_newest_general_three_hop_circuit_is_the_one() {
