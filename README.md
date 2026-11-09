@@ -81,7 +81,8 @@ always brings your network back — nothing survives it unless you turn on
 
 Run `sudo tormarchy uninstall`, then `omarchy plugin remove tripleu.tor`.
 Everything is put back, and the firewall rules come down first so you're never
-left offline. Add `--purge` to drop the `tor` package too.
+left offline. Add `--purge` to also drop the `tor` package and your membership
+of the `tor` group, which a plain uninstall leaves in place.
 
 ---
 
