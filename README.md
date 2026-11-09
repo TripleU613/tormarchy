@@ -17,7 +17,7 @@ password once, and a notification tells you when it's ready. That's it — the
 switch never asks again.
 
 <p align="center">
-  <img src="assets/screenshots/setup.png" alt="Before setup: the wordmark and one Set up button" width="40%">
+  <img src="assets/screenshots/first-run.png" alt="Before setup: the wordmark and one Set up button" width="40%">
 </p>
 
 Needs Omarchy 4 on x86_64. Setup installs `tor` for you.
