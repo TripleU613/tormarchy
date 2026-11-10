@@ -210,6 +210,16 @@ Panel {
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
     }
+    // Stops it while it is still downloading or verifying; once it is
+    // installing, it finishes.
+    Button {
+      visible: tor.settingUp
+      text: "Cancel"
+      focusable: false
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      onClicked: tor.cancelSetup()
+    }
     Brief { full: tor.settingUp ? "" : tor.setupError }
   }
 

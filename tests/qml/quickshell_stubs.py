@@ -258,7 +258,8 @@ def _proc_start(self):
     if argv and argv[0] == "pkexec":
         # Plays setup run through pkexec: TORMARCHY_STUB_SETUP is JSON,
         # {"code": n, "out": [lines], "err": [lines]}, or unset for pkexec not
-        # being there at all.
+        # being there at all. With "hold", it keeps running until its stdin is
+        # closed, then exits 130, as setup does when canceled.
         spec = os.environ.get("TORMARCHY_STUB_SETUP")
         if spec is None:
             self._running = False
@@ -272,6 +273,9 @@ def _proc_start(self):
             for line in lines:
                 if parser is not None and hasattr(parser, "read"):
                     parser.read.emit(line)
+        if spec.get("hold"):
+            self._held = True
+            return
         _proc_finish(self, int(code))
         return
     self.started.emit()
@@ -287,6 +291,12 @@ def _proc_set_stdin(self, v):
         return
     self._stdinEnabled = v
     self.stdinEnabledChanged.emit()
+    if not v and getattr(self, "_held", False) and _proc_get_running(self):
+        self._held = False
+        parser = getattr(self, "_stderr", None)
+        if parser is not None and hasattr(parser, "read"):
+            parser.read.emit("setup: canceled; nothing was installed")
+        _proc_finish(self, 130)
 
 
 def _proc_write(self, data):

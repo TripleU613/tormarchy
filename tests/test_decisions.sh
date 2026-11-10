@@ -138,6 +138,10 @@ reject "no summon of another plugin's panel" Panel.qml 'summon("omarchy.'
 want "setup is asked for through pkexec of the plugin's own bootstrap" Service.qml 'command: ["pkexec", root.pluginDir + "/setup"]'
 reject "never of the installed helper" Service.qml '"pkexec", "/usr/local/bin/tormarchy"'
 want "the bootstrap hands the helper SUDO_USER, never PKEXEC_UID" setup 'unset PKEXEC_UID'
+want "every download has a deadline" setup 'timeout 300 curl'
+want "and so does verifying" setup 'timeout 120 cosign verify-blob'
+want "the panel cancels by closing setup's stdin, the one thing it can do to root" Service.qml 'stdinEnabled: !canceled'
+want "and setup stops for that only before it installs" setup 'kill "$watcher"'
 want "a terminal and sudo where there is no polkit agent" Panel.qml '"sudo " + pluginDir + "/setup"'
 reject "no layer of the mark is placed against its own size" TorIcon.qml "(root.size - width) / 2"
 want "the size falls back where the shell has no bar icon size" Panel.qml "Style.bar.iconSize || "
