@@ -12,11 +12,14 @@
 # version this plugin declares, verifies it, and hands over to that binary's own
 # `setup`, which installs it as root.
 #
-# Verification is Sigstore's, not a checksum beside the download: the release's
-# signature must have been made by this repository's own release workflow,
-# running on its master branch, at exactly the commit the version's tag points
-# to on GitHub. Nothing here trusts the files in this (user-writable) checkout,
-# and nothing runs as root until that holds.
+# The release is pinned here, not looked up: the archive must have exactly the
+# SHA-256 below, and its Sigstore signature must have been made by this
+# repository's own release workflow, on master, at the commit below. GitHub
+# releases and tags can be replaced; this file is what was reviewed, so only the
+# build it names installs. Nothing runs as root until both hold.
+#
+# Each release is two steps: the version bump publishes it, then a commit pins
+# it here (the digest is only known once it is built). Until then this refuses.
 #
 #   sudo ./setup --local target/release   install binaries you built yourself,
 #                                         unverified, for development
@@ -28,6 +31,9 @@ umask 077
 REPO=TripleU613/tormarchy
 WORKFLOW=".github/workflows/auto-release.yml@refs/heads/master"
 ISSUER=https://token.actions.githubusercontent.com
+PINNED_VERSION=2.0.0
+PINNED_COMMIT=4dc964bbceb0901c3c0d06e27fbaa8b94b2b4a89
+PINNED_SHA256=d1eefdff657d80fc0bee4819f488f93b7a112ce7aedf8ba718c3bc846a2ee4b4
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 
 die() { echo "setup: $*" >&2; exit 1; }
@@ -66,6 +72,8 @@ else
   x86_64) arch=x86_64 ;;
   *) die "no release is built for $(uname -m); build it yourself and use --local" ;;
   esac
+  [[ $version == "$PINNED_VERSION" ]] \
+    || die "this plugin pins release $PINNED_VERSION, not $version; update the plugin, or use --local"
   asset="tormarchy-$version-$arch-linux.tar.gz"
   base="https://github.com/$REPO/releases/download/v$version"
 
@@ -82,18 +90,18 @@ else
   fetch "$base/$asset" "$work/$asset"
   fetch "$base/$asset.sigstore.json" "$work/$asset.sigstore.json"
 
-  # The commit the tag names on GitHub itself -- never this checkout's idea of
-  # it. Peeled, since the tag is annotated.
-  commit=$(git ls-remote "https://github.com/$REPO.git" "refs/tags/v$version^{}" | cut -f1)
-  [[ $commit =~ ^[0-9a-f]{40}$ ]] || die "v$version is not tagged on github.com/$REPO"
+  # Exactly the reviewed build, whatever the release on GitHub holds today.
+  got_sha=$(sha256sum "$work/$asset" | cut -d' ' -f1)
+  [[ $got_sha == "$PINNED_SHA256" ]] \
+    || die "the release is not the pinned build (sha256 $got_sha); nothing was installed"
 
-  echo "Verifying it was built by github.com/$REPO at $commit"
+  echo "Verifying it was built by github.com/$REPO at $PINNED_COMMIT"
   cosign verify-blob \
     --bundle "$work/$asset.sigstore.json" \
     --certificate-identity "https://github.com/$REPO/$WORKFLOW" \
     --certificate-oidc-issuer "$ISSUER" \
     --certificate-github-workflow-repository "$REPO" \
-    --certificate-github-workflow-sha "$commit" \
+    --certificate-github-workflow-sha "$PINNED_COMMIT" \
     "$work/$asset" >/dev/null \
     || die "the release did not verify; nothing was installed"
 

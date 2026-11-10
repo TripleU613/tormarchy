@@ -106,8 +106,9 @@ for f in etc/torrc.d/00-tormarchy.conf etc/tmpfiles/tor.conf etc/polkit/com.torm
 done
 want "setup verifies the release's Sigstore signature" setup 'cosign verify-blob'
 want "against this repository's release workflow" setup '--certificate-identity "https://github.com/$REPO/$WORKFLOW"'
-want "at the commit the tag names on GitHub" setup '--certificate-github-workflow-sha "$commit"'
-want "found on GitHub, not in this checkout" setup 'git ls-remote "https://github.com/$REPO.git"'
+want "at the commit this file pins, not the tag's" setup '--certificate-github-workflow-sha "$PINNED_COMMIT"'
+want "and only the archive this file pins" setup '[[ $got_sha == "$PINNED_SHA256" ]]'
+reject "never trusting where a (mutable) tag points today" setup 'git ls-remote'
 want "extracting only the two binaries" setup 'tormarchy tormarchyd'
 want "and checking the binary is the version the plugin declares" setup '[[ $got == "tormarchy $version" ]]'
 reject "uninstall does not disable a tor it never enabled" "$INSTALL" '"disable", "tor.service"'
