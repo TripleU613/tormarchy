@@ -463,6 +463,18 @@ w.send({"cmd": "pasteBridges"})
 w.until(lambda v: v["bridges"]["working"])
 w.send({"cmd": "watchers", "count": 1})
 check(w.until(lambda v: v["bridges"]["hasPreview"]), "but with a panel still open, the late paste arrives")
+w.knob("clipboard-delay", 2)
+for _ in range(2):
+    w.send({"cmd": "pasteBridges"})
+    w.until(lambda v: v["bridges"]["working"])
+    w.send({"cmd": "cancelBridges"})
+w.send({"cmd": "pasteBridges"})
+check(w.until(lambda v: "Still reading the clipboard" in v["bridges"]["message"]["full"]),
+      "cancel and paste again cannot pile up clipboard reads: a third waits for the first two")
+time.sleep(2.5)
+w.knob("clipboard-delay")
+w.send({"cmd": "pasteBridges"})
+check(w.until(lambda v: v["bridges"]["hasPreview"]), "and once they have answered, pasting works again")
 w.knob("clipboard-delay")
 w.close()
 

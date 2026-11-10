@@ -199,3 +199,7 @@ Two small Rust programs and a little QML.
 ## License
 
 MIT. Not affiliated with or endorsed by the Tor Project.
+
+Each release carries `THIRD-PARTY-NOTICES.txt`, the original notices of everything linked into the
+binaries (Rust crates, the Rust standard library, musl, libunwind). Setup installs it in
+`/usr/local/share/licenses/tormarchy/`.

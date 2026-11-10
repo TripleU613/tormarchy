@@ -79,6 +79,9 @@ const STATUS_LINGER: Duration = Duration::from_millis(2600);
 /// change falling back to a restart -- and that is not the kill switch holding.
 /// Only a "blocked" that lasts this long is real.
 const BLOCKED_GRACE: Duration = Duration::from_secs(4);
+/// Clipboard reads allowed at once. Each ends within its five-second deadline;
+/// cancel and paste again can start a second before the first is answered.
+const MAX_CLIPBOARD_READERS: u32 = 2;
 
 pub struct Daemon {
     tx: Sender<Ev>,
@@ -141,6 +144,9 @@ pub struct Daemon {
     /// Which paste is current. Canceling moves it on, so a clipboard read
     /// still in flight comes back as nobody's.
     paste_gen: u64,
+    /// Clipboard reads still running, current or not. Canceling lets a new
+    /// paste start at once, so this is what keeps them from piling up.
+    clipboard_readers: u32,
 
     notified: Option<ConnState>,
     blocked_since: Option<Instant>,
@@ -212,6 +218,7 @@ impl Daemon {
             bridge_message: String::new(),
             reading_clipboard: false,
             paste_gen: 0,
+            clipboard_readers: 0,
             notified: None,
             blocked_since: None,
             toast_id: String::new(),
@@ -278,7 +285,10 @@ impl Daemon {
                         self.exits_loaded = true;
                     }
                 }
-                Ev::Clipboard(generation, r) => self.clipboard_done(generation, r),
+                Ev::Clipboard(generation, r) => {
+                    self.clipboard_readers = self.clipboard_readers.saturating_sub(1);
+                    self.clipboard_done(generation, r)
+                }
                 Ev::Notified { status, id } => self.notified_done(status, id),
             }
             self.sync_ping();
@@ -962,8 +972,14 @@ impl Daemon {
         if self.reading_clipboard || self.bridge_set_running || !self.facts.installed {
             return;
         }
+        if self.clipboard_readers >= MAX_CLIPBOARD_READERS {
+            self.cancel_bridges();
+            self.bridge_message = "Still reading the clipboard. Try again in a moment.".into();
+            return;
+        }
         self.cancel_bridges();
         self.reading_clipboard = true;
+        self.clipboard_readers += 1;
         let generation = self.paste_gen;
         let tx = self.tx.clone();
         thread::spawn(move || {

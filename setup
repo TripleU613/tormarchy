@@ -66,6 +66,8 @@ if [[ ${1:-} == --local ]]; then
     [[ -f $dir/$b && ! -L $dir/$b ]] || die "$dir/$b is missing"
     install -m 0755 "$dir/$b" "$work/bin/$b"
   done
+  [[ -f $dir/THIRD-PARTY-NOTICES.txt && ! -L $dir/THIRD-PARTY-NOTICES.txt ]] \
+    && install -m 0644 "$dir/THIRD-PARTY-NOTICES.txt" "$work/bin/"
   echo "Installing UNVERIFIED local binaries from $dir"
 else
   case $(uname -m) in
@@ -117,9 +119,13 @@ else
     "$work/$asset" >/dev/null \
     || die "the release did not verify (or took too long to); nothing was installed"
 
-  # Exactly the two files, nothing else, nowhere else.
-  tar -xzf "$work/$asset" -C "$work/bin" --no-same-owner --no-same-permissions tormarchy tormarchyd \
+  # Exactly the two binaries and their notices, nothing else, nowhere else.
+  tar -xzf "$work/$asset" -C "$work/bin" --no-same-owner --no-same-permissions \
+    THIRD-PARTY-NOTICES.txt tormarchy tormarchyd \
     || die "the release archive is not what was expected"
+  [[ -f $work/bin/THIRD-PARTY-NOTICES.txt && ! -L $work/bin/THIRD-PARTY-NOTICES.txt ]] \
+    || die "the release is missing its notices"
+  chmod 0644 "$work/bin/THIRD-PARTY-NOTICES.txt"
   for b in tormarchy tormarchyd; do
     [[ -f $work/bin/$b && ! -L $work/bin/$b ]] || die "the release is missing $b"
     chmod 0755 "$work/bin/$b"
