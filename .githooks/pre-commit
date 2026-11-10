@@ -48,6 +48,14 @@ if ! printf '%s\n' "$staged" | grep -qvE '^(README\.md|CONTRIBUTING\.md|LICENSE|
   exit 0
 fi
 
+# Pinning a published release in setup (its PINNED_* lines and nothing else)
+# records that release; bumping here would publish a new one setup doesn't pin.
+shipping=$(printf '%s\n' "$staged" | grep -vE '^(README\.md|CONTRIBUTING\.md|LICENSE|\.gitignore|docs/|assets/|\.github/|tests/|Makefile|\.githooks/)' || true)
+if [[ $shipping == setup ]] && ! git diff --cached -U0 -- setup | grep -E '^[-+]' \
+    | grep -vE '^(\+\+\+|---) ' | grep -qvE '^[-+]PINNED_(VERSION|COMMIT|SHA256)='; then
+  exit 0
+fi
+
 current=$(python3 -c 'import json;print(json.load(open("manifest.json"))["version"])')
 
 # Deliberately NOT consulting tags. An earlier version asked
