@@ -176,6 +176,7 @@ echo 7
         self._script(os.path.join(self.bin, "wl-paste"), f"""#!/bin/bash
 code=$(cat {self.root}/knob.clipboard-exit 2>/dev/null)
 [[ -n $code ]] && exit "$code"
+sleep "$(cat {self.root}/knob.clipboard-delay 2>/dev/null || echo 0)"
 cat {self.root}/knob.clipboard 2>/dev/null
 """)
 
@@ -440,6 +441,29 @@ w.until(lambda v: v["bridges"]["hasPreview"])
 w.send({"cmd": "watchers", "count": 1})
 time.sleep(0.5)
 check(w.view["bridges"]["hasPreview"], "with two panels open, closing one keeps the other's paste")
+# A clipboard that answers late, after the paste it answers was given up.
+w.send({"cmd": "cancelBridges"})
+w.until(lambda v: not v["bridges"]["hasPreview"])
+w.knob("clipboard-delay", 1)
+w.send({"cmd": "pasteBridges"})
+w.until(lambda v: v["bridges"]["working"])
+w.send({"cmd": "watchers", "count": 0})
+time.sleep(1.8)
+w.send({"cmd": "watchers", "count": 1})
+time.sleep(0.4)
+check(not w.view["bridges"]["hasPreview"] and not w.view["bridges"]["working"],
+      "a paste still being read when the panel closes does not come back when it reopens")
+w.send({"cmd": "pasteBridges"})
+w.until(lambda v: v["bridges"]["working"])
+w.send({"cmd": "cancelBridges"})
+time.sleep(1.8)
+check(not w.view["bridges"]["hasPreview"], "nor one canceled, or left by changing section, while it was being read")
+w.send({"cmd": "watchers", "count": 2})
+w.send({"cmd": "pasteBridges"})
+w.until(lambda v: v["bridges"]["working"])
+w.send({"cmd": "watchers", "count": 1})
+check(w.until(lambda v: v["bridges"]["hasPreview"]), "but with a panel still open, the late paste arrives")
+w.knob("clipboard-delay")
 w.close()
 
 print("New circuit")

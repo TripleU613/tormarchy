@@ -34,7 +34,8 @@ pub enum Ev {
     Speed(Result<u64, String>),
     Leak(Report),
     Exits(Result<Vec<String>, String>),
-    Clipboard(Result<String, String>),
+    /// Tagged with the paste it answers, so one canceled meanwhile is dropped.
+    Clipboard(u64, Result<String, String>),
     Notified {
         status: Option<i32>,
         id: String,
@@ -137,6 +138,9 @@ pub struct Daemon {
     preview: Option<bridges::Report>,
     bridge_message: String,
     reading_clipboard: bool,
+    /// Which paste is current. Canceling moves it on, so a clipboard read
+    /// still in flight comes back as nobody's.
+    paste_gen: u64,
 
     notified: Option<ConnState>,
     blocked_since: Option<Instant>,
@@ -207,6 +211,7 @@ impl Daemon {
             preview: None,
             bridge_message: String::new(),
             reading_clipboard: false,
+            paste_gen: 0,
             notified: None,
             blocked_since: None,
             toast_id: String::new(),
@@ -273,7 +278,7 @@ impl Daemon {
                         self.exits_loaded = true;
                     }
                 }
-                Ev::Clipboard(r) => self.clipboard_done(r),
+                Ev::Clipboard(generation, r) => self.clipboard_done(generation, r),
                 Ev::Notified { status, id } => self.notified_done(status, id),
             }
             self.sync_ping();
@@ -945,6 +950,10 @@ impl Daemon {
         self.pending_bridges.clear();
         self.preview = None;
         self.bridge_message.clear();
+        // A read still in flight is no longer wanted: its answer is dropped
+        // when it comes, however late, and a new paste need not wait for it.
+        self.paste_gen += 1;
+        self.reading_clipboard = false;
     }
 
     /// The clipboard, read with a cap and a deadline before any of it is kept:
@@ -955,6 +964,7 @@ impl Daemon {
         }
         self.cancel_bridges();
         self.reading_clipboard = true;
+        let generation = self.paste_gen;
         let tx = self.tx.clone();
         thread::spawn(move || {
             let out = Run::new("wl-paste", ["--no-newline", "--type", "text/plain"])
@@ -970,11 +980,14 @@ impl Daemon {
             } else {
                 Ok(String::from_utf8_lossy(&out.stdout).into_owned())
             };
-            let _ = tx.send(Ev::Clipboard(r));
+            let _ = tx.send(Ev::Clipboard(generation, r));
         });
     }
 
-    fn clipboard_done(&mut self, r: Result<String, String>) {
+    fn clipboard_done(&mut self, generation: u64, r: Result<String, String>) {
+        if generation != self.paste_gen {
+            return;
+        }
         self.reading_clipboard = false;
         let text = match r {
             Ok(t) => t,
