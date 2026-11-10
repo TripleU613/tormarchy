@@ -135,7 +135,7 @@
     "statusText": "All traffic through Tor via DE",
     "switchCaption": "ON",
     "switchCaptionLit": false,
-    "version": "2.0.1",
+    "version": "2.0.2",
     "warning": {
       "full": "",
       "short": ""

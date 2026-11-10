@@ -66,11 +66,14 @@ jobs:
           out=target/x86_64-unknown-linux-musl/release
           [[ $("$out/tormarchy" version) == "tormarchy $VERSION" ]] || { echo "binary version does not match the manifest"; exit 1; }
           mkdir -p dist
+          # The original notices of everything linked in, from this toolchain
+          # and these exact crate sources; setup installs it with the binaries.
+          python3 .github/scripts/notices.py > "$out/THIRD-PARTY-NOTICES.txt"
           # The same bytes for the same binaries: sorted, owned by nobody, dated
           # by the commit.
           tar --sort=name --owner=0 --group=0 --numeric-owner \
             --mtime="@$(git log -1 --format=%ct)" -C "$out" \
-            -czf "dist/tormarchy-$VERSION-x86_64-linux.tar.gz" tormarchy tormarchyd
+            -czf "dist/tormarchy-$VERSION-x86_64-linux.tar.gz" THIRD-PARTY-NOTICES.txt tormarchy tormarchyd
           sha256sum dist/*.tar.gz
 
       - name: Install cosign

@@ -50,6 +50,11 @@ else
     fail "cargo test failed"
   fi
   cargo build --locked --quiet 2>/dev/null && pass "the helper and the daemon build" || fail "cargo build failed"
+  # The release ships this file; a linked crate without license files to copy
+  # would stop the release, so it stops here first.
+  python3 .github/scripts/notices.py >/dev/null 2>/tmp/tormarchy-notices.err \
+    && pass "every linked crate's notices can be shipped" \
+    || { cat /tmp/tormarchy-notices.err; fail "third-party notices could not be generated"; }
 fi
 bin=target/debug/tormarchy
 

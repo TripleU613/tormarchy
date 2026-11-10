@@ -23,6 +23,9 @@ const ZSH_COMPLETION: &str = include_str!("../../../etc/completion/_tormarchy");
 
 const INCLUDE_MARKER: &str = "# Added by tormarchy setup.";
 const POLKIT_ACTION_COUNT: usize = 7;
+/// Where the third-party notices the release carries are installed.
+const NOTICES_DIR: &str = "/usr/local/share/licenses/tormarchy";
+const NOTICES: &str = "THIRD-PARTY-NOTICES.txt";
 
 fn step(s: &str) {
     println!("\n\x1b[1m{s}\x1b[0m");
@@ -127,6 +130,16 @@ pub fn setup(_args: &[String]) -> Res {
         }
     }
     let _ = fs::remove_dir_all("/usr/local/lib/tormarchy");
+    // The notices of everything linked into the two binaries, which every
+    // release archive carries beside them. A development build may have none.
+    let notices = me.with_file_name(NOTICES);
+    if notices.is_file() {
+        let bytes = fs::read(&notices)
+            .map_err(|e| Fail(format!("could not read {}: {e}", notices.display())))?;
+        let to = Path::new(NOTICES_DIR).join(NOTICES);
+        install_file(&to, &bytes, 0o644)?;
+        println!("  {}", to.display());
+    }
 
     step("Configuring tor");
     install_file(&paths.torrc_base, TORRC_SNIPPET.as_bytes(), 0o644)?;
@@ -382,7 +395,8 @@ pub fn uninstall(purge: bool) -> Res {
     ] {
         sys::remove_file_quiet(&f);
     }
-    println!("  helpers, torrc snippets, polkit files and completion");
+    let _ = fs::remove_dir_all(NOTICES_DIR);
+    println!("  helpers, torrc snippets, polkit files, completion and notices");
 
     // Only our own include, recognised by the marker above it: the tor package
     // may ship that same line.
