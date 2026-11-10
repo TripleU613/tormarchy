@@ -108,7 +108,7 @@
     "statusText": "Tor helpers are not installed",
     "switchCaption": "OFF",
     "switchCaptionLit": false,
-    "version": "2.0.0",
+    "version": "2.0.1",
     "warning": {
       "full": "",
       "short": ""
