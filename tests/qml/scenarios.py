@@ -214,6 +214,14 @@ check(asked == [True] and svc.property("setupError") == "",
       "with no polkit agent to ask, the panel is sent to a terminal instead")
 svc.deleteLater()
 
+svc, asked = run_setup({"hold": True, "out": ["Fetching Tormarchy 2.0.0"]})
+check(svc.property("settingUp") is True, "while setup downloads, it is still running")
+call(svc, "cancelSetup")
+wait(100)
+check(svc.property("settingUp") is False and svc.property("setupError") == "Setup canceled. Nothing was installed."
+      and notes() == [], "Cancel closes setup's stdin; it stops, says so under the button, and notifies nothing")
+svc.deleteLater()
+
 svc, asked = run_setup(None)
 check(asked == [True] and svc.property("settingUp") is False, "and the same with no pkexec at all")
 svc.deleteLater()

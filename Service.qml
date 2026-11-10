@@ -137,7 +137,16 @@ Item {
     setupRun.lastError = ""
     setupRun.noAgent = false
     setupRun.exitSeen = false
+    setupRun.canceled = false
     setupRun.running = true
+  }
+
+  // The panel cannot signal setup: pkexec made it root. Closing its stdin is
+  // the one thing it can do, and setup stops at that until it starts installing.
+  function cancelSetup() {
+    if (!setupRun.running || setupRun.canceled) return
+    setupRun.canceled = true
+    setupStatus = "Canceling..."
   }
 
   function notify(args) {
@@ -150,6 +159,9 @@ Item {
     id: setupRun
     command: ["pkexec", root.pluginDir + "/setup"]
     running: false
+    // Held open only so closing it can mean Cancel; nothing is written.
+    stdinEnabled: !canceled
+    property bool canceled: false
     property string lastError: ""
     property bool noAgent: false
     property bool exitSeen: false
@@ -184,6 +196,8 @@ Item {
         else daemon.running = true
       } else if (setupRun.noAgent) {
         root.setupNeedsTerminal()
+      } else if (code === 130 && setupRun.canceled) {
+        root.setupError = "Setup canceled. Nothing was installed."
       } else if (code === 126 || code === 127) {
         // The password dialog was dismissed, or the password refused.
       } else {

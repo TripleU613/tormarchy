@@ -82,10 +82,22 @@ else
     pacman -S --needed --noconfirm cosign || die "could not install cosign. Run 'omarchy update', then setup again."
   fi
 
+  # From here to the hand-off only downloads and checks happen, so this part
+  # is bounded and can be canceled: every network wait has a deadline, and
+  # when the panel closes our stdin (its Cancel) the running step is killed and
+  # setup exits 130. pacman, above, and the install below are never cut off
+  # midway. A terminal's stdin is not a pipe, so sudo runs keep Ctrl-C.
+  if [[ -p /dev/stdin ]]; then
+    trap 'echo "setup: canceled; nothing was installed" >&2; exit 130' TERM
+    { while read -r _; do :; done; kill -TERM $$; pkill -TERM -P $$; } <&0 &
+    watcher=$!
+  fi
+
   echo "Fetching Tormarchy $version"
   fetch() {
-    curl -fsSL --proto '=https' --tlsv1.2 --max-filesize 33554432 --retry 3 -o "$2" "$1" \
-      || die "could not download $1"
+    timeout 300 curl -fsSL --proto '=https' --tlsv1.2 --max-filesize 33554432 \
+      --connect-timeout 15 --max-time 90 --retry 3 -o "$2" "$1" \
+      || die "could not download $1 (no answer, or too slow); nothing was installed"
   }
   fetch "$base/$asset" "$work/$asset"
   fetch "$base/$asset.sigstore.json" "$work/$asset.sigstore.json"
@@ -96,14 +108,14 @@ else
     || die "the release is not the pinned build (sha256 $got_sha); nothing was installed"
 
   echo "Verifying it was built by github.com/$REPO at $PINNED_COMMIT"
-  cosign verify-blob \
+  timeout 120 cosign verify-blob \
     --bundle "$work/$asset.sigstore.json" \
     --certificate-identity "https://github.com/$REPO/$WORKFLOW" \
     --certificate-oidc-issuer "$ISSUER" \
     --certificate-github-workflow-repository "$REPO" \
     --certificate-github-workflow-sha "$PINNED_COMMIT" \
     "$work/$asset" >/dev/null \
-    || die "the release did not verify; nothing was installed"
+    || die "the release did not verify (or took too long to); nothing was installed"
 
   # Exactly the two files, nothing else, nowhere else.
   tar -xzf "$work/$asset" -C "$work/bin" --no-same-owner --no-same-permissions tormarchy tormarchyd \
@@ -112,6 +124,12 @@ else
     [[ -f $work/bin/$b && ! -L $work/bin/$b ]] || die "the release is missing $b"
     chmod 0755 "$work/bin/$b"
   done
+
+  # Past here it installs, and is let finish.
+  if [[ -n ${watcher:-} ]]; then
+    kill "$watcher" 2>/dev/null || true
+    trap - TERM
+  fi
 fi
 
 got=$("$work/bin/tormarchy" version 2>/dev/null || true)
