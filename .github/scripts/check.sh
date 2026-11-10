@@ -75,6 +75,12 @@ grep -q 'WORKFLOW=".github/workflows/auto-release.yml@refs/heads/master"' setup 
   && grep -q 'auto-release.yml@refs/heads/master' .github/workflows/auto-release.yml \
   && pass "setup verifies the identity the release job signs with" \
   || fail "setup and the release workflow disagree on the signing identity"
+# Well-formed only: the version-bump commit runs this before its release exists,
+# so the pin legitimately trails the manifest until the follow-up pin commit.
+grep -qE '^PINNED_COMMIT=[0-9a-f]{40}$' setup && grep -qE '^PINNED_SHA256=[0-9a-f]{64}$' setup \
+  && pass "setup pins a release commit and digest" || fail "setup's release pin is malformed"
+grep -q "^PINNED_VERSION=$manifest_version\$" setup && pass "setup pins this version's release" \
+  || note "setup pins an older release than $manifest_version; pin it once the release is published"
 
 # ----------------------------------------------------------------------- data --
 

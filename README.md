@@ -155,7 +155,9 @@ fails while the panel is closed. One toast, updated in place. Set
 Setup downloads the release for your plugin version and checks its
 [Sigstore](https://www.sigstore.dev/) signature before anything runs as root: it
 must have been built by this repository's own release workflow, on `master`, at
-the exact commit the version's tag names on GitHub. There's no signing key to
+the exact commit this plugin's `setup` pins, and the archive must match the
+SHA-256 pinned beside it. Replacing the release on GitHub changes nothing: only
+what this reviewed checkout names will install. There's no signing key to
 steal. If it doesn't verify, nothing is installed.
 
 The password dialog uses polkit's own wording — it asks to run
