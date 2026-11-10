@@ -31,9 +31,9 @@ umask 077
 REPO=TripleU613/tormarchy
 WORKFLOW=".github/workflows/auto-release.yml@refs/heads/master"
 ISSUER=https://token.actions.githubusercontent.com
-PINNED_VERSION=2.0.0
-PINNED_COMMIT=4dc964bbceb0901c3c0d06e27fbaa8b94b2b4a89
-PINNED_SHA256=d1eefdff657d80fc0bee4819f488f93b7a112ce7aedf8ba718c3bc846a2ee4b4
+PINNED_VERSION=2.0.2
+PINNED_COMMIT=378557e172db00fc6dee1806c6c2912aac612a12
+PINNED_SHA256=a5981ad118405cc1c3ee10ed95ed761729b58c6f14748cd09c492ee109bbf6c9
 HERE=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 
 die() { echo "setup: $*" >&2; exit 1; }
